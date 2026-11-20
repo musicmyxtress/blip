@@ -3,6 +3,8 @@ import type {
   ActResult,
   BrowserContentResult,
   BrowserLinkListResult,
+  BrowserOutlineResult,
+  BrowserRegionResult,
   BrowserPageIdentity,
   BrowserReadItemResult,
   BrowserResultPayload,
@@ -15,6 +17,8 @@ type BrowserScrollResult = Extract<BrowserResultPayload, { ok: true; operation: 
 
 export type BrowserContentRequest =
   | { t: "browser-content"; operation: "capture" | "list-links"; identity: BrowserPageIdentity }
+  | { t: "browser-content"; operation: "outline"; identity: BrowserPageIdentity }
+  | { t: "browser-content"; operation: "read-region"; identity: BrowserPageIdentity; regionId: string }
   | { t: "browser-content"; operation: "read-content"; identity: BrowserPageIdentity; contentId: string; kind: "heading" | "paragraph" }
   | { t: "browser-content"; operation: "read-item"; identity: BrowserPageIdentity; itemId: string }
   | { t: "browser-content"; operation: "site-search"; identity: BrowserPageIdentity; query: string }
@@ -32,6 +36,8 @@ export type BrowserContentRequest =
 
 export type BrowserContentResponse =
   | { t: "browser-content.result"; operation: "capture"; result: BrowserContentResult }
+  | { t: "browser-content.result"; operation: "outline"; result: BrowserOutlineResult }
+  | { t: "browser-content.result"; operation: "read-region"; result: BrowserRegionResult }
   | { t: "browser-content.result"; operation: "list-links"; result: BrowserLinkListResult }
   | { t: "browser-content.result"; operation: "read-content"; result: BrowserContentResult }
   | { t: "browser-content.result"; operation: "read-item"; result: BrowserReadItemResult }

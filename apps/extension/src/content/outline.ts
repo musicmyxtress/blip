@@ -5,7 +5,7 @@
 // (ad frames, sponsored labels, cookie banners, link farms) so the server and model can decide
 // what matters for the user's goal, then read only those regions in full with readRegion().
 // Read-only: nothing here changes the page.
-import { isVisible } from "./visibility";
+import { isVisible } from "./visibility.js";
 
 export type OutlineRegionKind =
   | "main" | "navigation" | "banner" | "contentinfo" | "complementary" | "search" | "form"

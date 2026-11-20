@@ -8,7 +8,6 @@
 //   npm start -- --brain=fake offline fake brain
 //   npm start -- --no-window  restart the service while reusing an existing Blip tab
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -33,12 +32,9 @@ function parseBrain(args: string[]): "claude" | "agy" | "fake" {
 }
 
 async function ensureExtensionBuild(): Promise<void> {
+  // Always rebuild: the fork changes extension code, and a stale build silently lacks new operations.
+  // Chrome still needs the Reload button on chrome://extensions to pick up a changed build.
   const socketUrl = `ws://${LOOPBACK_HOST}:${DEFAULT_PORT}${WS_PATH}`;
-  try {
-    if ((await readFile(path.join(extensionDist, "background.js"), "utf8")).includes(socketUrl)) return;
-  } catch {
-    // A fresh checkout has no extension build yet.
-  }
   await buildExtension({ socketUrl });
 }
 
@@ -77,6 +73,7 @@ async function main(): Promise<number> {
       ...(brain === "claude" ? { agyAdapter: createClaudeCliAdapter() } : {}),
       deferAgyStartup: true,
       dialogueRunner: true,
+      desk: true,
       repairCacheDirectory: demoRepairCachePath(),
       staticRoots: [demoVoiceStaticRoot()],
       voiceBuildId,
@@ -93,6 +90,7 @@ async function main(): Promise<number> {
     }
 
     process.stdout.write(`Blip is running (brain=${brain}).\n`);
+    if (server.deskTokenPath) process.stdout.write(`Desk API ready; token file: ${server.deskTokenPath}\n`);
     process.stdout.write(`${openVoiceWindow ? "Voice window" : "Voice page (reuse an existing Blip tab)"}: ${voiceUrl}\n`);
     process.stdout.write("Talk: hold Right Ctrl + Space anywhere, or use Hold to talk in the Blip window.\n");
 

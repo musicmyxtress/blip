@@ -10,6 +10,8 @@ import { createStaticHandler, type StaticRoot } from "./hub/static";
 import { Session, type Brain } from "./session/session";
 import { createRefresher, type Refresher } from "./session/refresh";
 import { createFakeBrain, type IntentBrain } from "./brain/fake-brain";
+import { createDeskApi } from "./desk/desk";
+import { createBrowserExecutor } from "./browser/executor";
 import { createAgyProvider, createDeferredAgyProvider, type AgyProvider } from "./brain/agy/provider";
 import { RepairCoordinator, type RepairDiagnostic, type RepairProvider } from "./brain/agy/repair-coordinator";
 import type { AgyCliAdapter, AgySessionOptions } from "./brain/agy/session";
@@ -94,6 +96,8 @@ export type StartServerOptions = {
   intentWatchdog?: { schedule(callback: () => void, delayMs: number): unknown; cancel(handle: unknown): void };
   /** Optional static roots (voice build, form fixtures). Behind the same Host check as everything else. */
   staticRoots?: StaticRoot[];
+  /** Enable the token-protected desk API for the native front end (writes a token file). */
+  desk?: boolean | { tokenPath?: string };
 };
 
 /** Resolved settings the later plans read (fake brain delay, snapshot timeout). */
@@ -114,6 +118,8 @@ export type RunningServer = {
   config: ServerConfig;
   session: Session;
   hub: Hub;
+  /** Present when the desk API is enabled: where its bearer token was written. */
+  deskTokenPath?: string;
   close(): Promise<void>;
 };
 
@@ -135,6 +141,14 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
   const serveStatic =
     options.staticRoots && options.staticRoots.length > 0 ? createStaticHandler(options.staticRoots) : undefined;
 
+  let deskHub: Hub | null = null;
+  const desk = options.desk
+    ? await createDeskApi({
+        executor: () => createBrowserExecutor({ hub: deskHub!, session }),
+        ...(typeof options.desk === "object" && options.desk.tokenPath !== undefined ? { tokenPath: options.desk.tokenPath } : {}),
+      })
+    : null;
+
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     if (!hostAllowed(req.headers.host, boundPort, dev)) {
       log("warn", { msg: "http host rejected", ...(req.headers.host !== undefined ? { host: req.headers.host } : {}) });
@@ -151,6 +165,11 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
     if (pathname === "/voice" || pathname.startsWith("/voice/")) {
       res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
       res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
+    }
+    if (desk !== null && pathname.startsWith("/desk/")) {
+      const search = new URL(req.url ?? "/", "http://x").searchParams;
+      void desk.handle(req, res, pathname, search);
+      return;
     }
     // /healthz stays ahead of static roots so a static file can never shadow it.
     if (req.method === "GET" && pathname === "/healthz") return json(res, 200, { ok: true });
@@ -340,6 +359,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
     ...(options.speechOutput !== undefined ? { speechOutput: options.speechOutput } : {}),
     handlers,
   });
+  deskHub = hub;
 
   const repairProvider = options.repairProvider ?? agyProvider ?? undefined;
   if (repairProvider !== undefined) {
@@ -530,6 +550,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
     port: boundPort,
     url: `ws://${LOOPBACK_HOST}:${boundPort}${WS_PATH}`,
     httpServer: server,
+    ...(desk !== null ? { deskTokenPath: desk.tokenPath } : {}),
     config: {
       dev,
       brain: session.brain,

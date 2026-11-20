@@ -329,6 +329,46 @@ export function createBrowserRequestDispatcher(dependencies: BrowserRequestDepen
       return success(requestId, "site-search", typed.result);
     }
 
+    if (operation.op === "outline") {
+      const current = await liveCurrentTab(api, dependencies, tabId);
+      if (!current) return failure(requestId, "outline", tabId === undefined ? "unsupported-page" : "stale-page", "The current browser page changed before the outline was built.");
+      const identity = nextIdentity(current);
+      if (!identity) return failure(requestId, "outline", "restricted-page", "This browser page cannot be read as web content.");
+      const sent = await sendContent(dependencies, current.id, { t: "browser-content", operation: "outline", identity });
+      if (!sent.ok) return failure(requestId, "outline", sent.code, sent.code === "timeout"
+        ? "The page outline did not return before its time limit."
+        : "The top-level content frame is unavailable.");
+      const typed = sent.response as BrowserContentResponse;
+      const failed = contentFailure(requestId, "outline", typed);
+      if (failed) return failed;
+      if (typed.t !== "browser-content.result" || typed.operation !== "outline" || !sameIdentity(identity, typed.result)) {
+        return failure(requestId, "outline", "stale-capture", "The page outline did not match the current page.");
+      }
+      const rechecked = await liveCurrentTab(api, dependencies, current.id, identity.pageUrl);
+      if (!rechecked) return failure(requestId, "outline", "stale-page", "The browser page changed while the outline was being built.");
+      return success(requestId, "outline", typed.result);
+    }
+
+    if (operation.op === "read-region") {
+      const identity = operation.identity;
+      const current = await liveCurrentTab(api, dependencies, identity.tabId, identity.pageUrl);
+      if (!current) return failure(requestId, "read-region", "stale-page", "The current browser page no longer matches this outline.");
+      const sent = await sendContent(dependencies, current.id, { t: "browser-content", operation: "read-region", identity, regionId: operation.regionId });
+      if (!sent.ok) return failure(requestId, "read-region", sent.code, sent.code === "timeout"
+        ? "Reading that part of the page did not finish before its time limit."
+        : "The top-level content frame is unavailable.");
+      const typed = sent.response as BrowserContentResponse;
+      const failed = contentFailure(requestId, "read-region", typed);
+      if (failed) return failed;
+      if (typed.t !== "browser-content.result" || typed.operation !== "read-region" ||
+          !sameIdentity(identity, typed.result.identity) || typed.result.id !== operation.regionId) {
+        return failure(requestId, "read-region", "stale-capture", "That part of the page no longer matches the outline.");
+      }
+      const rechecked = await liveCurrentTab(api, dependencies, identity.tabId, identity.pageUrl);
+      if (!rechecked) return failure(requestId, "read-region", "stale-page", "The browser page changed before the result was accepted.");
+      return success(requestId, "read-region", typed.result);
+    }
+
     if (operation.op === "capture" || operation.op === "list-links") {
       const expectedIdentity = operation.op === "list-links" ? operation.identity : undefined;
       const current = await liveCurrentTab(api, dependencies, expectedIdentity?.tabId ?? tabId, expectedIdentity?.pageUrl);

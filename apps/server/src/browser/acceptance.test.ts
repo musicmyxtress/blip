@@ -168,6 +168,9 @@ function makeBrowserRig(options: {
   function respond(request: BrowserRequestPayload): BrowserResultPayload {
     const operation = request.operation;
     switch (operation.op) {
+      case "outline":
+      case "read-region":
+        return { ok: false, requestId: request.requestId, operation: operation.op, error: { code: "unavailable", message: "Not simulated." } };
       case "capture": {
         if (pendingPageIndex !== null && !options.navigationNeverLoads && capturesUntilArrival-- <= 0) {
           currentPageIndex = pendingPageIndex;

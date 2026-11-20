@@ -87,10 +87,10 @@ describe("BrowserOperation", () => {
     expect(BrowserOperation.safeParse(operation).success).toBe(true);
   });
 
-  it("contains exactly the 14 closed operation discriminants", () => {
+  it("contains exactly the 16 closed operation discriminants", () => {
     expect(BrowserOperation.options.map((option) => option.shape.op.value)).toEqual([
       "location", "capture", "navigate", "history", "reload", "search", "site-search", "tabs",
-      "list-links", "read-content", "read-item", "open-link", "scroll", "find",
+      "list-links", "read-content", "read-item", "open-link", "scroll", "find", "outline", "read-region",
     ]);
     expect(BrowserOperation.safeParse({ op: "script", script: "location.href='https://evil.test'" }).success).toBe(false);
     expect(BrowserOperation.safeParse({ op: "confirm" }).success).toBe(false);

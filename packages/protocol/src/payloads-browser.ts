@@ -70,6 +70,9 @@ const NonEmptyQuery = boundedText(500).refine((value) => value.trim().length > 0
   message: "must not be empty",
 });
 
+/** Outline region and list-item ids issued by the extension: r12 for a region, r12.3 for an item in a list. */
+const RegionId = z.string().min(2).max(32).regex(/^r[0-9]{1,9}(\.[0-9]{1,4})?$/);
+
 export const BrowserPageIdentity = z.object({
   captureId: BrowserId,
   captureRevision: CaptureRevision,
@@ -234,8 +237,66 @@ export const BrowserOperation = z.discriminatedUnion("op", [
     }
   }),
   z.object({ op: z.literal("find"), query: NonEmptyQuery, identity: BrowserPageIdentity }),
+  /** Whole-page outline: landmarks, heading sections, repeated lists, with layout and noise evidence. */
+  z.object({ op: z.literal("outline") }),
+  /** Full text of one outline region or list item, bound to the outline that issued its id. */
+  z.object({ op: z.literal("read-region"), regionId: RegionId, identity: BrowserPageIdentity }),
 ]);
 export type BrowserOperation = z.infer<typeof BrowserOperation>;
+
+const OutlineCount = z.number().int().min(0).max(1_000_000);
+const OutlineCoordinate = z.number().int().min(-1_000_000).max(10_000_000);
+
+export const BrowserOutlineListItem = z.object({
+  id: RegionId,
+  label: boundedText(120),
+  preview: boundedText(200),
+}).strict();
+
+export const BrowserOutlineRegion = z.object({
+  id: RegionId,
+  kind: z.enum([
+    "main", "navigation", "banner", "contentinfo", "complementary", "search", "form",
+    "dialog", "alert", "section", "iframe", "overlay", "list",
+  ]),
+  label: boundedText(120),
+  level: z.number().int().min(0).max(6),
+  parentId: RegionId.nullable(),
+  rect: z.object({ x: OutlineCoordinate, y: OutlineCoordinate, w: OutlineCount, h: OutlineCount }).strict(),
+  viewportShare: z.number().min(0).max(1),
+  headingPx: z.number().int().min(0).max(1000),
+  textChars: OutlineCount,
+  links: OutlineCount,
+  buttons: OutlineCount,
+  fields: OutlineCount,
+  images: OutlineCount,
+  noise: z.array(z.enum([
+    "ad-frame", "ad-marker", "sponsored", "cookie-banner", "fixed-overlay", "link-farm", "offscreen",
+    "pagination", "link-row",
+  ])).max(12),
+  preview: boundedText(200),
+  items: z.array(BrowserOutlineListItem).max(100).optional(),
+}).strict();
+export type BrowserOutlineRegion = z.infer<typeof BrowserOutlineRegion>;
+
+export const BrowserOutlineResult = BrowserPageIdentity.extend({
+  status: z.enum(["supported", "restricted"]),
+  title: boundedText(200),
+  viewport: z.object({ w: OutlineCount, h: OutlineCount, scrollY: OutlineCoordinate }).strict(),
+  pageHeight: OutlineCount,
+  regions: z.array(BrowserOutlineRegion).max(300),
+  truncated: z.boolean(),
+});
+export type BrowserOutlineResult = z.infer<typeof BrowserOutlineResult>;
+
+export const BrowserRegionResult = z.object({
+  identity: BrowserPageIdentity,
+  id: RegionId,
+  label: boundedText(120),
+  text: boundedText(20_000),
+  truncated: z.boolean(),
+});
+export type BrowserRegionResult = z.infer<typeof BrowserRegionResult>;
 
 /** Live read result for one item, still bound to the exact capture that supplied its ID. */
 export const BrowserReadItemResult = BrowserContentItem;
@@ -257,7 +318,7 @@ export type BrowserRequestPayload = z.infer<typeof BrowserRequestPayload>;
 
 export const BrowserOperationName = z.enum([
   "location", "capture", "navigate", "history", "reload", "search", "site-search", "tabs",
-  "list-links", "read-content", "read-item", "open-link", "scroll", "find", "unknown",
+  "list-links", "read-content", "read-item", "open-link", "scroll", "find", "outline", "read-region", "unknown",
 ]);
 
 const BrowserCommandResult = z.object({
@@ -322,6 +383,8 @@ const BrowserSuccess = z.discriminatedUnion("operation", [
   z.object({ ok: z.literal(true), requestId: BrowserId, operation: z.literal("open-link"), result: BrowserCommandResult }),
   z.object({ ok: z.literal(true), requestId: BrowserId, operation: z.literal("scroll"), result: BrowserScrollResult }),
   z.object({ ok: z.literal(true), requestId: BrowserId, operation: z.literal("find"), result: BrowserFindResult }),
+  z.object({ ok: z.literal(true), requestId: BrowserId, operation: z.literal("outline"), result: BrowserOutlineResult }),
+  z.object({ ok: z.literal(true), requestId: BrowserId, operation: z.literal("read-region"), result: BrowserRegionResult }),
 ]);
 
 const BrowserFailure = z.object({

@@ -11,6 +11,7 @@ import {
 import { classifyBrowserLink } from "@blip/policy/classify";
 import { boundedText } from "./text.js";
 import { isVisible } from "./visibility.js";
+import { buildOutline, readRegion } from "./outline.js";
 import { beginOneSubmitAllowance } from "./submit-guard.js";
 import type { BrowserContentRequest, BrowserContentResponse } from "../shared/messages.js";
 
@@ -690,6 +691,19 @@ export function handleBrowserContentRequest(
         return { t: "browser-content.result", operation: "list-links", result: { ...request.identity, status: "restricted", links: [], truncated: false } };
       }
       return { t: "browser-content.result", operation: "list-links", result: listLinks(captureByDocument.get(document)!) };
+    }
+    case "outline": {
+      if (!/^https?:/i.test(request.identity.pageUrl)) {
+        return { t: "browser-content.result", operation: "outline", result: {
+          ...request.identity, status: "restricted", title: "", viewport: { w: 0, h: 0, scrollY: 0 }, pageHeight: 0, regions: [], truncated: false,
+        } };
+      }
+      return { t: "browser-content.result", operation: "outline", result: { ...request.identity, status: "supported", ...buildOutline(document) } };
+    }
+    case "read-region": {
+      const region = readRegion(document, request.regionId);
+      if (region === null) return failure(request, "not-found", "That part of the page is gone; refresh the outline.");
+      return { t: "browser-content.result", operation: "read-region", result: { identity: request.identity, ...region } };
     }
     case "read-content": return readBlock(document, request, frameId);
     case "read-item": return readItem(document, request, frameId);
