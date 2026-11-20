@@ -3,7 +3,8 @@
 // dedicated profiles and no test pages. The extension is loaded once, by hand, into the user's
 // normal Edge or Chrome profile; the voice window opens as an app window in that same profile.
 //
-//   npm start                 AGY brain (the signed-in Antigravity CLI)
+//   npm start                 Claude brain (the signed-in Claude Code CLI, tool-less)
+//   npm start -- --brain=agy  AGY brain (the signed-in Antigravity CLI)
 //   npm start -- --brain=fake offline fake brain
 //   npm start -- --no-window  restart the service while reusing an existing Blip tab
 import { spawn } from "node:child_process";
@@ -14,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { DEFAULT_PORT, LOOPBACK_HOST, WS_PATH } from "@blip/protocol";
 import { buildExtension } from "../apps/extension/build.js";
 import { startServer, type RunningServer } from "../apps/server/src/server.js";
+import { createClaudeCliAdapter } from "../apps/server/src/brain/claude/cli-adapter.js";
 import { discoverLocalWhisper } from "../apps/server/src/voice/local-whisper";
 import { startPttWire } from "../dev/mock-server/src/ptt-wire.js";
 import { resolveBrowser } from "./browser.js";
@@ -23,10 +25,10 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const extensionDist = path.join(repoRoot, "apps", "extension", "dist");
 const EXTENSION_HINT_MS = 15_000;
 
-function parseBrain(args: string[]): "agy" | "fake" {
+function parseBrain(args: string[]): "claude" | "agy" | "fake" {
   const flag = args.find((arg) => arg.startsWith("--brain="));
-  const brain = flag === undefined ? "agy" : flag.slice("--brain=".length);
-  if (brain !== "agy" && brain !== "fake") throw new Error("--brain must be agy or fake");
+  const brain = flag === undefined ? "claude" : flag.slice("--brain=".length);
+  if (brain !== "claude" && brain !== "agy" && brain !== "fake") throw new Error("--brain must be claude, agy or fake");
   return brain;
 }
 
@@ -70,7 +72,9 @@ async function main(): Promise<number> {
     server = await startServer({
       port: DEFAULT_PORT,
       dev: true,
-      brain,
+      // The Claude brain reuses the AGY role-session manager (and all its safety checks) through an adapter.
+      brain: brain === "claude" ? "agy" : brain,
+      ...(brain === "claude" ? { agyAdapter: createClaudeCliAdapter() } : {}),
       deferAgyStartup: true,
       dialogueRunner: true,
       repairCacheDirectory: demoRepairCachePath(),

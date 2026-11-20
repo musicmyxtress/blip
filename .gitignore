@@ -19,3 +19,4 @@ fixtures/demo/profile.json
 .local-stt/
 .claude/
 *.bundle
+scratch/
