@@ -695,7 +695,8 @@ export function handleBrowserContentRequest(
     case "outline": {
       if (!/^https?:/i.test(request.identity.pageUrl)) {
         return { t: "browser-content.result", operation: "outline", result: {
-          ...request.identity, status: "restricted", title: "", viewport: { w: 0, h: 0, scrollY: 0 }, pageHeight: 0, regions: [], truncated: false,
+          ...request.identity, status: "restricted", title: "", steps: { next: null, previous: null, more: null },
+          viewport: { w: 0, h: 0, scrollY: 0 }, pageHeight: 0, regions: [], truncated: false,
         } };
       }
       return { t: "browser-content.result", operation: "outline", result: { ...request.identity, status: "supported", ...buildOutline(document) } };

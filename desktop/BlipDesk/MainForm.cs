@@ -26,6 +26,7 @@ public sealed class MainForm : Form
 
     private readonly Stack<View> _views = new();
     private PageOutline? _outline;
+    private (DeskControl? Next, DeskControl? Previous) _steps;
     private bool _showHidden;
     private bool _busy;
 
@@ -140,6 +141,7 @@ public sealed class MainForm : Form
         try
         {
             _outline = await _client.GetOutlineAsync();
+            await LoadPageStepsAsync();
             ResetToOutline();
             Text = $"Blip Desk - {_outline.Title}";
             if (announce is not null) SetStatus($"{announce} {Summary()}"); else SetStatus(Summary());
@@ -151,8 +153,17 @@ public sealed class MainForm : Form
     private void ResetToOutline()
     {
         _views.Clear();
-        _views.Push(new View("Page", () => _outline is null ? [] : PageView.Build(_outline, _showHidden)));
+        _views.Push(new View("Page", () => _outline is null ? [] : PageView.Build(_outline, _showHidden, _steps)));
         ShowCurrent(selectId: null);
+    }
+
+    /// <summary>Finds Next/Previous page links in the page-number area, if the page has one.</summary>
+    private async Task LoadPageStepsAsync()
+    {
+        _steps = default;
+        if (_outline is null || PageView.Pager(_outline) is not { } pager) return;
+        try { _steps = PageView.FindPageSteps(_outline, await _client.GetControlsAsync(pager.Id)); }
+        catch (DeskException) { /* no steps: the page numbers stay available at the end of the list */ }
     }
 
     private string Summary() => _page.Items.Count > 0 ? ((PageEntry)_page.Items[0]).Text : "";
@@ -181,7 +192,9 @@ public sealed class MainForm : Form
         _page.Items.Clear();
         foreach (var entry in entries) _page.Items.Add(entry);
         _page.EndUpdate();
-        var index = selectId is null ? 0 : Math.Max(0, entries.FindIndex(e => e.Id == selectId));
+        // Like a sighted reader's eyes after a page loads: land on the results when there are some.
+        var index = selectId is not null ? Math.Max(0, entries.FindIndex(e => e.Id == selectId))
+            : _views.Count == 1 ? Math.Max(0, entries.FindIndex(e => e.IsResults)) : 0;
         if (_page.Items.Count > 0) _page.SelectedIndex = index;
         _page.Focus();
     }
@@ -195,8 +208,10 @@ public sealed class MainForm : Form
         {
             case EntryKind.Region when entry.IsList && entry.Region is not null:
                 var list = entry.Region;
-                Push(new View(PageView.Name(list), () => PageView.BuildItems(list), ReturnToId: list.Id));
+                var listTitle = entry.IsResults ? entry.Text[..entry.Text.LastIndexOf(", ", StringComparison.Ordinal)] : PageView.Name(list);
+                Push(new View(listTitle, () => PageView.BuildItems(list, listTitle), ReturnToId: list.Id));
                 break;
+
             case EntryKind.Region when entry.Id is not null:
                 await OpenChoicesAsync(entry.Id, entry.Region is null ? entry.Text : PageView.Name(entry.Region), direct: false);
                 break;
@@ -310,6 +325,7 @@ public sealed class MainForm : Form
                 if (outline.PageUrl != oldUrl && outline.Regions.Count > 0)
                 {
                     _outline = outline;
+                    await LoadPageStepsAsync();
                     ResetToOutline();
                     Text = $"Blip Desk - {outline.Title}";
                     SetStatus($"Opened. {Summary()}");

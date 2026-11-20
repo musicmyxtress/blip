@@ -50,8 +50,16 @@ export type OutlineListItem = {
   preview: string;
 };
 
+export type PageSteps = {
+  next: RegionControlsResult["controls"][number] | null;
+  previous: RegionControlsResult["controls"][number] | null;
+  more: RegionControlsResult["controls"][number] | null;
+};
+
 export type PageOutline = {
   title: string;
+  /** Next/previous page links and a "load more" button, found by rel= attributes and common labels. */
+  steps: PageSteps;
   viewport: { w: number; h: number; scrollY: number };
   pageHeight: number;
   regions: OutlineRegion[];
@@ -376,8 +384,29 @@ export function buildOutline(document: Document): PageOutline {
     }
   }
 
+  // A heading inside a list's card (each search result's title) is already one of that list's items:
+  // drop its separate heading section so results aren't listed twice.
+  const inCard = (region: OutlineRegion): boolean => {
+    if (region.kind === "list" || region.kind === "iframe" || region.kind === "dialog" || region.kind === "alert") return false;
+    const heading = map.get(region.id);
+    if (!heading) return false;
+    for (const container of listed) if (container.contains(heading) && container !== heading) return true;
+    return false;
+  };
+  const kept = regions.filter((region) => !inCard(region));
+  if (kept.length !== regions.length) {
+    const dropped = new Set(regions.filter((region) => !kept.includes(region)).map((region) => region.id));
+    for (const id of dropped) { map.delete(id); sectionEnds.delete(id); sectionColumns.delete(id); }
+    regions.length = 0;
+    regions.push(...kept);
+  }
+
   return {
     title: document.title.slice(0, 200),
+    steps: findPageSteps(document, new Set([...listed].filter((container) => {
+      const region = regions.find((candidate) => map.get(candidate.id) === container);
+      return region !== undefined && !region.noise.includes("pagination") && !region.noise.includes("link-row");
+    }))),
     viewport: { w: Math.round(viewportW), h: Math.round(viewportH), scrollY: Math.round(scrollY) },
     pageHeight: Math.round(document.documentElement.scrollHeight),
     regions,
@@ -463,7 +492,7 @@ export function readRegion(document: Document, regionId: string): RegionReadResu
 // submission that a button click would trigger.
 
 type ControlAccess = "direct" | "confirm" | "blocked";
-type ControlEntry = { element: Element; kind: "link" | "button"; label: string; href: string | null };
+type ControlEntry = { element: Element; kind: "link" | "button"; label: string; href: string | null; pageLink?: boolean };
 
 const CONTROL_SELECTOR = "a[href],button,[role=button],[role=link],input[type=submit],input[type=button],input[type=reset],input[type=image],summary";
 const MAX_CONTROLS = 200;
@@ -603,10 +632,68 @@ export function activateControl(document: Document, controlId: string, confirmed
   if (live.kind !== entry.kind || live.href !== entry.href || controlLabel(element) !== entry.label) {
     return { ok: false, code: "stale-capture", message: "That link or button changed after it was listed." };
   }
-  const rating = rateControl(element, entry, document.location?.href ?? "");
+  const rating = ratePageControl(element, entry, document, entry.pageLink === true);
   if (rating.access === "blocked") return { ok: false, code: "invalid-target", message: `Not allowed: ${rating.note}.` };
   if (rating.access === "confirm" && !confirmed) return { ok: false, code: "unauthorized", message: `This needs your yes first: ${rating.note}.` };
   if (entry.kind === "link") return { ok: true, result: { kind: "link", href: entry.href!, access: rating.access } };
   (element as HTMLElement).click();
   return { ok: true, result: { kind: "button" } };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Page steps: how a sighted reader gets more results. Prefer explicit rel=next/prev, then common
+// labels ("Next", "›", "Load more"). Each step is minted as a control so the desk can activate it
+// through the normal checked path.
+
+const NEXT_LABEL = /^\s*(?:(?:next(?: page)?|older(?: posts)?|more results)\s*[›»→>]?|[›»→>])\s*$/i;
+const PREVIOUS_LABEL = /^\s*(?:[‹«←<]?\s*(?:prev(?:ious)?(?: page)?|newer(?: posts)?)|[‹«←<])\s*$/i;
+const MORE_LABEL = /^\s*(?:(?:load|show|see|view) more(?: results| items| posts| repositories)?|more results|show all results)\s*[.…]*\s*$/i;
+
+function mintStep(document: Document, element: Element | null, pageLink = false): RegionControlsResult["controls"][number] | null {
+  if (!element || !isVisible(element)) return null;
+  const { kind, href } = controlKind(element);
+  const label = controlLabel(element) || (element.getAttribute("rel") ?? "").trim();
+  if (!label) return null;
+  let map = controlsByDocument.get(document);
+  if (!map) { map = new Map(); controlsByDocument.set(document, map); }
+  nextControlNumber += 1;
+  const id = `c${nextControlNumber}`;
+  map.set(id, { element, kind, label, href, pageLink });
+  const rating = ratePageControl(element, { kind, label, href }, document, pageLink);
+  return { id, kind, label, host: kind === "link" ? hostOf(href) : null, ...rating };
+}
+
+/** rateControl, plus: a same-site next/previous page link outside any form opens directly. */
+function ratePageControl(element: Element, entry: { kind: "link" | "button"; label: string; href: string | null }, document: Document, pageLink: boolean): { access: ControlAccess; note: string } {
+  let rating = rateControl(element, entry, document.location?.href ?? "");
+  const { kind, href } = entry;
+  // Blip's policy distrusts "Next" because of multi-step forms. A same-site next/previous page
+  // link outside any form is followed by navigating to its address, which cannot submit anything.
+  if (pageLink && kind === "link" && rating.access === "confirm" && element.closest("form") === null) {
+    try {
+      if (new URL(href!).origin === new URL(document.location.href).origin) rating = { access: "direct", note: "" };
+    } catch { /* keep the stricter rating */ }
+  }
+  return rating;
+}
+
+/** Steps are page-level: controls inside a result card (an image carousel's arrows) never count. */
+function findPageSteps(document: Document, cards: Set<Element>): PageSteps {
+  const inCard = (element: Element): boolean => {
+    for (const container of cards) if (container.contains(element)) return true;
+    return false;
+  };
+  const visibleOf = (selector: string): Element | null =>
+    [...document.querySelectorAll(selector)].find((element) => isVisible(element) && !inCard(element)) ?? null;
+  const byLabel = (pattern: RegExp, selector: string): Element | null =>
+    [...document.querySelectorAll(selector)].find((element) => {
+      const label = (element.getAttribute("aria-label") ?? "").trim() || textOf(element, 40);
+      return pattern.test(label) && isVisible(element) && !inCard(element);
+    }) ?? null;
+  return {
+    // Pagination is links; carousels use buttons. Only "load more" may be a button.
+    next: mintStep(document, visibleOf("a[rel~=next][href]") ?? byLabel(NEXT_LABEL, "a[href]"), true),
+    previous: mintStep(document, visibleOf("a[rel~=prev][href]") ?? byLabel(PREVIOUS_LABEL, "a[href]"), true),
+    more: mintStep(document, byLabel(MORE_LABEL, "button,[role=button],a[href]")),
+  };
 }

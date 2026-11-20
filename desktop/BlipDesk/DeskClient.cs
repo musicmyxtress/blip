@@ -168,6 +168,14 @@ public sealed class PageOutline
     public int PageHeight { get; set; }
     public bool Truncated { get; set; }
     public List<OutlineRegion> Regions { get; set; } = [];
+    public PageStepsInfo? Steps { get; set; }
+}
+
+public sealed class PageStepsInfo
+{
+    public DeskControl? Next { get; set; }
+    public DeskControl? Previous { get; set; }
+    public DeskControl? More { get; set; }
 }
 
 public sealed class OutlineRegion

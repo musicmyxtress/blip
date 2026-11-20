@@ -291,6 +291,11 @@ export type BrowserOutlineRegion = z.infer<typeof BrowserOutlineRegion>;
 export const BrowserOutlineResult = BrowserPageIdentity.extend({
   status: z.enum(["supported", "restricted"]),
   title: boundedText(200),
+  steps: z.object({
+    next: z.lazy(() => BrowserControl).nullable(),
+    previous: z.lazy(() => BrowserControl).nullable(),
+    more: z.lazy(() => BrowserControl).nullable(),
+  }).strict().optional(),
   viewport: z.object({ w: OutlineCount, h: OutlineCount, scrollY: OutlineCoordinate }).strict(),
   pageHeight: OutlineCount,
   regions: z.array(BrowserOutlineRegion).max(300),
