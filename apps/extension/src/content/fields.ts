@@ -32,6 +32,8 @@ export type FieldInfo = {
   hint: string;
   options?: FieldOption[];
   maxLength?: number;
+  dateFormat?: string;
+  dateFormatSource?: "page" | "value" | "language";
 };
 
 type FieldEntry = {
@@ -193,6 +195,69 @@ function invalidText(element: Element): string {
   return (message || "marked as not valid").slice(0, 300);
 }
 
+/**
+ * A plain text box that the page turns into a date picker with its own calendar pop-up. Real
+ * browser date fields report type "date" already; these only show up as "text".
+ */
+function looksLikeDate(element: Element): boolean {
+  if (element.localName !== "input" || inputType(element) !== "text") return false;
+  const popup = (element.getAttribute("aria-haspopup") ?? "").toLowerCase();
+  if (popup === "dialog" || popup === "grid") return true;
+  const hints = [
+    element.getAttribute("name"), element.id, element.getAttribute("class"), element.getAttribute("placeholder"),
+    element.getAttribute("autocomplete"), labelCandidatesOf(element)[0]?.text,
+  ].join(" ");
+  // "update" and "candidate" contain "date": only count it at a word's start or end.
+  return /(^|[^a-z])date|(start|end|due|birth|expiry)date|datepicker|\bdob\b|birthday|\bbday\b|\b(mm|dd)\/(dd|mm)\/yy/i.test(hints);
+}
+
+/** Turns a written pattern like "dd.mm.yyyy" or "YYYY-MM-DD" into fixed tokens, or null. */
+function normalizePattern(pattern: string): string | null {
+  const match = /^\s*([dmy]{1,4})([\/.\- ])([dmy]{1,4})\2([dmy]{1,4})\s*$/i.exec(pattern);
+  if (!match) return null;
+  const token = (part: string): string | null => {
+    const lower = part.toLowerCase();
+    if (/^d{1,2}$/.test(lower)) return "DD";
+    if (/^m{1,2}$/.test(lower)) return "MM";
+    if (/^y{4}$/.test(lower)) return "YYYY";
+    if (/^y{2}$/.test(lower)) return "YY";
+    return null;
+  };
+  const parts = [token(match[1]!), token(match[3]!), token(match[4]!)];
+  if (parts.some((part) => part === null)) return null;
+  const kinds = new Set(parts.map((part) => part![0]));
+  return kinds.size === 3 ? `${parts[0]}${match[2]}${parts[1]}${match[2]}${parts[2]}` : null;
+}
+
+/**
+ * The format a date text box expects: from the page's own hint (placeholder, the calendar
+ * library's format attribute, or a pattern), else from a date already in the box, else a guess
+ * from the page's language.
+ */
+function dateFormatOf(element: Element): { format: string; source: "page" | "value" | "language" } {
+  const hints = [
+    element.getAttribute("placeholder"), element.getAttribute("data-date-format"), element.getAttribute("data-format"),
+    element.getAttribute("data-dateformat"), element.closest("[data-date-format]")?.getAttribute("data-date-format"),
+  ];
+  for (const hint of hints) {
+    const format = hint ? normalizePattern(hint) : null;
+    if (format) return { format, source: "page" };
+  }
+  const lang = (element.ownerDocument.documentElement.getAttribute("lang") ?? "").toLowerCase();
+  const monthFirst = lang === "" || lang === "en" || lang === "en-us";
+  const value = (element as HTMLInputElement).value.trim();
+  const parts = /^(\d{1,4})([\/.\-])(\d{1,2})\2(\d{2,4})$/.exec(value);
+  if (parts) {
+    const [first, separator, second, third] = [parts[1]!, parts[2]!, parts[3]!, parts[4]!];
+    const year = third.length === 4 ? "YYYY" : "YY";
+    if (first.length === 4) return { format: `YYYY${separator}MM${separator}DD`, source: "value" };
+    if (Number(first) > 12) return { format: `DD${separator}MM${separator}${year}`, source: "value" };
+    if (Number(second) > 12) return { format: `MM${separator}DD${separator}${year}`, source: "value" };
+    return { format: monthFirst ? `MM${separator}DD${separator}${year}` : `DD${separator}MM${separator}${year}`, source: "language" };
+  }
+  return { format: monthFirst ? "MM/DD/YYYY" : "DD/MM/YYYY", source: "language" };
+}
+
 function describe(id: string, entry: FieldEntry): FieldInfo {
   const element = entry.element;
   const safe = safeValueOf(element);
@@ -233,7 +298,14 @@ function describe(id: string, entry: FieldEntry): FieldInfo {
       return { ...base, value: null, hint: inputType(element) === "file" ? "File upload. Do this one on the page." : base.hint };
     default: {
       const maxLength = (element as HTMLInputElement).maxLength;
-      return { ...base, value: safe.value === null ? null : safe.value.slice(0, 10_000), ...(maxLength > 0 ? { maxLength } : {}) };
+      const dateText = entry.kind === "text" && looksLikeDate(element);
+      const date = dateText ? dateFormatOf(element) : null;
+      return {
+        ...base,
+        ...(date ? { inputType: "text-date", dateFormat: date.format, dateFormatSource: date.source } : {}),
+        value: safe.value === null ? null : safe.value.slice(0, 10_000),
+        ...(maxLength > 0 ? { maxLength } : {}),
+      };
     }
   }
 }

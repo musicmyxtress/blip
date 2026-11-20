@@ -378,6 +378,13 @@ export const BrowserField = z.object({
   hint: boundedText(300),
   options: z.array(BrowserFieldOption).max(300).optional(),
   maxLength: z.number().int().min(-1).max(1_000_000).optional(),
+  /**
+   * For text boxes that hold a date: the page's format in fixed tokens (MM, DD, YYYY or YY, and
+   * one separator), e.g. "MM/DD/YYYY", and where it came from: the page's own hint, a date already
+   * in the box, or a guess from the page's language.
+   */
+  dateFormat: z.string().regex(/^(MM|DD|YYYY|YY)([\/.\- ])(MM|DD|YYYY|YY)\2(MM|DD|YYYY|YY)$/).optional(),
+  dateFormatSource: z.enum(["page", "value", "language"]).optional(),
 }).strict();
 export type BrowserField = z.infer<typeof BrowserField>;
 

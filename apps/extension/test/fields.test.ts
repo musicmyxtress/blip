@@ -170,3 +170,43 @@ describe("validity after Blip's own change", () => {
     expect(outcome.ok && outcome.field.invalid).not.toBe("");
   });
 });
+
+describe("date fields", () => {
+  it("calls a page's pop-up-calendar text box a date and passes on its format", () => {
+    document.body.innerHTML = `
+      <label for="d">Date picker</label><input id="d" name="my-date" placeholder="mm/dd/yyyy">
+      <label for="n">Nickname</label><input id="n" name="nick">`;
+    const [date, nick] = regionFields(document, null)!.fields;
+    expect(date).toMatchObject({ inputType: "text-date", dateFormat: "MM/DD/YYYY", dateFormatSource: "page" });
+    expect(nick!.inputType).toBe("text");
+  });
+});
+
+describe("date detection", () => {
+  it("doesn't mistake words that merely contain 'date' for dates", () => {
+    document.body.innerHTML = `
+      <label for="c">Candidate name</label><input id="c">
+      <label for="u">Update note</label><input id="u">
+      <label for="s">Start</label><input id="s" name="startdate">`;
+    expect(regionFields(document, null)!.fields.map((f) => f.inputType)).toEqual(["text", "text", "text-date"]);
+  });
+});
+
+describe("date formats", () => {
+  function formatFor(html: string, lang = "") {
+    document.documentElement.setAttribute("lang", lang);
+    document.body.innerHTML = html;
+    const [field] = regionFields(document, null)!.fields;
+    return [field!.dateFormat, field!.dateFormatSource];
+  }
+
+  it("prefers the page's own hint, then a date already there, then the page's language", () => {
+    expect(formatFor(`<label for="d">Date</label><input id="d" placeholder="DD.MM.YYYY">`)).toEqual(["DD.MM.YYYY", "page"]);
+    expect(formatFor(`<label for="d">Date</label><input id="d" data-date-format="yyyy-mm-dd">`)).toEqual(["YYYY-MM-DD", "page"]);
+    expect(formatFor(`<label for="d">Date</label><input id="d" value="19/11/2026">`)).toEqual(["DD/MM/YYYY", "value"]);
+    expect(formatFor(`<label for="d">Date</label><input id="d" value="11-19-26">`)).toEqual(["MM-DD-YY", "value"]);
+    expect(formatFor(`<label for="d">Date</label><input id="d">`, "en-GB")).toEqual(["DD/MM/YYYY", "language"]);
+    expect(formatFor(`<label for="d">Date</label><input id="d">`, "en-US")).toEqual(["MM/DD/YYYY", "language"]);
+    document.documentElement.removeAttribute("lang");
+  });
+});

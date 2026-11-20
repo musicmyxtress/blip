@@ -175,6 +175,10 @@ public sealed class DeskField
     public string Hint { get; set; } = "";
     public List<FieldOption>? Options { get; set; }
     public int? MaxLength { get; set; }
+    /// <summary>For date text boxes: the page's format in fixed tokens, e.g. "MM/DD/YYYY".</summary>
+    public string? DateFormat { get; set; }
+    /// <summary>page, value, or language (a guess).</summary>
+    public string? DateFormatSource { get; set; }
 }
 
 public sealed class FieldOption

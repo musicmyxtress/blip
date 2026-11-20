@@ -465,7 +465,7 @@ public sealed class MainForm : Form
             "Escape or Backspace at the top of the Page list, or Alt Left Arrow anywhere: back to the previous page.",
             "Control H: show or hide the hidden parts, such as ads and cookie banners.",
             "Alt F: every form field on this page as normal Windows controls. Enter on a form or search part, or Fill in the form in a part's choices, opens just that part's fields.",
-            "In a form: Tab between fields. Each change goes to the page when you leave the field. Alt Down Arrow opens a list-style field's choices. The form's buttons are at the end, and a button that may send the form asks first and reads every field back. Blip never fills passwords or card numbers.",
+            "In a form: Tab between fields. Each change goes to the page when you leave the field. In a list-style field, type a few letters if it takes typing, then press Down Arrow for the page's matching choices. Date fields are Month, Day and Year dropdowns; Tab between them, and Blip writes the date in the page's own format. The form's buttons are at the end, and a button that may send the form asks first and reads every field back. Blip never fills passwords or card numbers.",
             "Alt G, Alt A, Alt P, Alt C: jump to Goal, Ask, Page, or Content.",
             "In Ask, type a question and press Enter. Claude's answer opens in the Page list, followed by suggested links or buttons. Claude never uses them; you choose.",
             "In Goal, press Enter to ask what on this page helps with your goal. The goal stays set as you move between pages.",

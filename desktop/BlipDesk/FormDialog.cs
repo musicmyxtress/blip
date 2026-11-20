@@ -4,7 +4,8 @@ namespace BlipDesk;
 //
 //   Tab / Shift+Tab   move between fields, then the form's buttons, then Close
 //   (leaving a field) sends that change to the page; check boxes change at once
-//   Alt+Down Arrow    in a list-style field: open its choices from the page
+//   Down Arrow        in a list-style field (after typing a few letters, if it takes typing):
+//                     open the page's matching choices; Alt+Down Arrow works too
 //   F5                read the form again from the page
 //   Escape            close (a change you were typing is sent first)
 //
@@ -19,6 +20,8 @@ public sealed class FormDialog : Form
         public Control Main { get; set; } = null!;
         public List<Control> Parts { get; } = [];
         public Func<Task> Commit { get; set; } = () => Task.CompletedTask;
+        /// <summary>Set when the control names itself from the description (date dropdowns).</summary>
+        public Action<string>? Rename { get; set; }
         public string Key => $"{Field.Kind}|{Field.Label}";
     }
 
@@ -169,7 +172,15 @@ public sealed class FormDialog : Form
     {
         var parts = new List<string> { f.Label };
         if (f.Required) parts.Add("required");
-        if (f.Kind == "text" && !TypingTypes.Contains(f.InputType) && f.InputType != "password") parts.Add(f.InputType);
+        if (f.Kind == "text" && !TypingTypes.Contains(f.InputType) && f.InputType != "password")
+        {
+            parts.Add(f.InputType switch { "text-date" => "date", "datetime-local" => "date and time", var other => other });
+        }
+        if (f.DateFormat is { } pattern)
+        {
+            var spoken = SpokenDateFormat(pattern);
+            parts.Add(f.DateFormatSource == "page" ? $"page format {spoken}" : $"Blip's guess at the page's format: {spoken}");
+        }
         if (f.MaxLength is > 0) parts.Add($"up to {f.MaxLength} characters");
         if (f.Disabled) parts.Add("turned off on the page");
         var text = string.Join(", ", parts);
@@ -186,6 +197,7 @@ public sealed class FormDialog : Form
         _bindings.Add(binding);
         switch (field.Kind)
         {
+            case "text" when (field.InputType is "date" or "time" or "datetime-local" || field.DateFormat is not null) && !field.Sensitive: AddDate(binding); break;
             case "text" or "textarea": AddText(binding); break;
             case "select": AddSelect(binding); break;
             case "checkbox": AddCheckBox(binding); break;
@@ -237,6 +249,108 @@ public sealed class FormDialog : Form
         box.Leave += (_, _) => _ = RunAsync(binding.Commit);
         Bind(binding, box);
     }
+
+    /// <summary>
+    /// Date and time fields become plain dropdowns: Month, Day, Year (and Hour, Minute). Tab moves
+    /// between them; arrows or typing choose ("N" for November, "2026" for the year). Blip writes the
+    /// result in the page's own format, so the user never has to know it.
+    /// </summary>
+    private void AddDate(Binding binding)
+    {
+        var f = binding.Field;
+        AddLabel(binding);
+        var invariant = System.Globalization.CultureInfo.InvariantCulture;
+        var hasDate = f.InputType != "time";
+        var hasTime = f.InputType is "time" or "datetime-local";
+        // Real browser date fields always use ISO dates; a page's own date box uses its own format.
+        var format = f.InputType switch
+        {
+            "time" => "HH:mm",
+            "datetime-local" => "yyyy-MM-dd'T'HH:mm",
+            _ when f.DateFormat is { } pattern => NetDateFormat(pattern),
+            _ => "yyyy-MM-dd",
+        };
+        var parsed = DateTime.TryParseExact(f.Value ?? "", [format, "HH:mm:ss", "yyyy-MM-dd'T'HH:mm:ss"],
+            invariant, System.Globalization.DateTimeStyles.None, out var current);
+
+        var row = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, AutoSize = true, WrapContents = false, Margin = new Padding(0) };
+        var parts = new List<(string Name, ComboBox Box)>();
+        ComboBox Part(string name, IReadOnlyList<string> items, int selected, int width)
+        {
+            var box = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = width, AccessibleName = name, TabIndex = parts.Count };
+            box.Items.Add("not set");
+            foreach (var item in items) box.Items.Add(item);
+            box.SelectedIndex = selected >= 0 ? selected + 1 : 0;
+            parts.Add((name, box));
+            row.Controls.Add(box);
+            return box;
+        }
+
+        var thisYear = DateTime.Today.Year;
+        var years = Enumerable.Range(thisYear - 100, 111).Reverse().ToList();
+        if (parsed && !years.Contains(current.Year)) years.Add(current.Year);
+        ComboBox? month = null, day = null, year = null, hour = null, minute = null;
+        if (hasDate)
+        {
+            month = Part("Month", invariant.DateTimeFormat.MonthNames.Take(12).ToList(), parsed ? current.Month - 1 : -1, 150);
+            day = Part("Day", Enumerable.Range(1, 31).Select(d => d.ToString(invariant)).ToList(), parsed ? current.Day - 1 : -1, 90);
+            year = Part("Year", years.Select(y => y.ToString(invariant)).ToList(), parsed ? years.IndexOf(current.Year) : -1, 100);
+        }
+        if (hasTime)
+        {
+            hour = Part("Hour, 24-hour clock", Enumerable.Range(0, 24).Select(h => h.ToString("00", invariant)).ToList(), parsed ? current.Hour : -1, 90);
+            minute = Part("Minute", Enumerable.Range(0, 60).Select(m => m.ToString("00", invariant)).ToList(), parsed ? current.Minute : -1, 90);
+        }
+        // The first dropdown carries the field's full description, so JAWS reads it on arrival.
+        void Name(string description) => parts[0].Box.AccessibleName = $"{description}, {parts[0].Name}";
+        Name(Describe(f));
+
+        // Null: incomplete or impossible (like 30 February). Empty: every part "not set".
+        string? Wire()
+        {
+            if (parts.All(p => p.Box.SelectedIndex == 0)) return "";
+            if (parts.Any(p => p.Box.SelectedIndex == 0)) return null;
+            var date = hasDate ? (Year: years[year!.SelectedIndex - 1], Month: month!.SelectedIndex, Day: day!.SelectedIndex) : (Year: 2000, Month: 1, Day: 1);
+            if (date.Day > DateTime.DaysInMonth(date.Year, date.Month)) return null;
+            var value = new DateTime(date.Year, date.Month, date.Day, hasTime ? hour!.SelectedIndex - 1 : 0, hasTime ? minute!.SelectedIndex - 1 : 0, 0);
+            return value.ToString(format, invariant);
+        }
+        var applied = Wire() ?? "";
+        binding.Commit = async () =>
+        {
+            var sending = Wire();
+            if (sending is null)
+            {
+                Say($"{f.Label}: choose every part ({string.Join(", ", parts.Select(p => p.Name.Split(',')[0].ToLowerInvariant()))}), and make sure the day exists in that month.");
+                return;
+            }
+            if (sending == applied) return;
+            if (await SendAsync(binding, () => _client.SetFieldTextAsync(binding.Field.Id, sending)) is not { } result) return;
+            applied = result.Field.Value ?? "";
+            // A page's own calendar may reject or rewrite a date it can't read: say what it did.
+            if (f.DateFormat is not null && applied != sending && result.Field.Invalid == "")
+            {
+                Say(applied == ""
+                    ? $"{f.Label}: the page didn't keep {sending}. Its format may differ from {SpokenDateFormat(f.DateFormat)}; you can type the date on the page instead."
+                    : $"{f.Label}: you sent {sending}, and the page changed it to {applied}.");
+            }
+        };
+        // Send once focus leaves the whole date, not after each part.
+        row.Leave += (_, _) => _ = RunAsync(binding.Commit);
+        Add(row);
+        binding.Main = parts[0].Box;
+        binding.Parts.Add(row);
+        binding.Parts.AddRange(parts.Select(p => (Control)p.Box));
+        binding.Rename = Name;
+    }
+
+    /// <summary>"MM/DD/YYYY" becomes "month/day/year", for speech.</summary>
+    private static string SpokenDateFormat(string pattern) => pattern
+        .Replace("YYYY", "year").Replace("YY", "2-digit year").Replace("MM", "month").Replace("DD", "day");
+
+    /// <summary>"MM/DD/YYYY" becomes the .NET format "MM/dd/yyyy".</summary>
+    private static string NetDateFormat(string pattern) => pattern
+        .Replace("YYYY", "yyyy").Replace("YY", "yy").Replace("DD", "dd").Replace("/", "'/'");
 
     private void AddSelect(Binding binding)
     {
@@ -311,7 +425,7 @@ public sealed class FormDialog : Form
         var box = new TextBox
         {
             Width = 440, Text = f.Value ?? "", ReadOnly = !typing,
-            AccessibleName = Describe(f) + (typing ? ". Type to filter, then Alt Down Arrow for choices" : ". Alt Down Arrow for choices"),
+            AccessibleName = Describe(f) + (typing ? ". Type to filter, then Down Arrow for choices" : ". Down Arrow for choices"),
         };
         var choose = new Button { Text = "Choose from list…", AutoSize = true, AccessibleName = $"Choose {f.Label} from a list" };
         row.Controls.Add(box);
@@ -347,9 +461,10 @@ public sealed class FormDialog : Form
             if (result is not null) { applied = result.Field.Value ?? ""; if (box.Text == sending) box.Text = applied; }
         };
         choose.Click += async (_, _) => await RunAsync(ChooseAsync);
+        // Type to filter, then Down Arrow: the page's matching choices open in a list, focus inside it.
         box.KeyDown += async (_, e) =>
         {
-            if (e.KeyCode == Keys.Down && e.Alt) { e.Handled = e.SuppressKeyPress = true; await RunAsync(ChooseAsync); }
+            if (e.KeyCode == Keys.Down) { e.Handled = e.SuppressKeyPress = true; await RunAsync(ChooseAsync); }
         };
         // Moving from the box to its own Choose button is part of choosing, not a finished entry.
         box.Leave += (_, _) => BeginInvoke(() => { if (!choose.Focused) _ = RunAsync(binding.Commit); });
@@ -434,7 +549,8 @@ public sealed class FormDialog : Form
             case GroupBox group: group.Text = text; break;
             case CheckBox check: check.Text = text; break;
         }
-        if (binding.Main is TextBox or ComboBox) binding.Main.AccessibleName = text;
+        if (binding.Rename is not null) binding.Rename(text);
+        else if (binding.Main is TextBox or ComboBox) binding.Main.AccessibleName = text;
     }
 
     private string? FocusedKey()
