@@ -16,11 +16,17 @@ import { dirname, join } from "node:path";
 import { newId, type BrowserOutlineResult, type BrowserPageIdentity } from "@blip/protocol";
 import type { BrowserExecutor } from "../browser/executor";
 import { log } from "../log";
+import { startClaudeJsonSession } from "../brain/claude/cli-adapter";
+import { ASK_INSTRUCTIONS, askAboutPage, type AskModel } from "./ask";
 
 export type DeskOptions = {
   executor: () => BrowserExecutor;
   /** Where the bearer token is written; defaults to %LOCALAPPDATA%\BlipDesk\desk-token (or ~/.blip-desk). */
   tokenPath?: string;
+  /** Enables POST /desk/ask using a tool-less Claude CLI session (started on first use). */
+  claude?: boolean;
+  /** Test seam: supply the Ask model directly. */
+  askModel?: AskModel;
 };
 
 export type DeskApi = {
@@ -54,7 +60,8 @@ function tokenMatches(header: string | undefined, token: string): boolean {
 
 const REGION_ID = /^r[0-9]{1,9}(\.[0-9]{1,4})?$/;
 const CONTROL_ID = /^c[0-9]{1,9}$/;
-const MAX_BODY_BYTES = 1024;
+const MAX_BODY_BYTES = 4096;
+const MAX_ASK_CHARS = 500;
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -77,6 +84,9 @@ export async function createDeskApi(options: DeskOptions): Promise<DeskApi> {
   /** Identity of the latest outline: region ids are only valid against the outline that issued them. */
   let outlineIdentity: BrowserPageIdentity | null = null;
   let outlineTitle = "";
+  let lastOutline: BrowserOutlineResult | null = null;
+  let askModel: Promise<AskModel> | null = options.askModel ? Promise.resolve(options.askModel) : null;
+  let asking = false;
   /**
    * Pages the user left by following a link from the desk, newest last. Back only ever navigates to
    * an address recorded here (where the user actually was), never to one taken from a page or model.
@@ -94,6 +104,7 @@ export async function createDeskApi(options: DeskOptions): Promise<DeskApi> {
     const { captureId, captureRevision, tabId, pageUrl } = outlineResult;
     outlineIdentity = { captureId, captureRevision, tabId, pageUrl };
     outlineTitle = outlineResult.title;
+    lastOutline = outlineResult;
     send(res, 200, { ok: true, outline: outlineResult });
   }
 
@@ -142,6 +153,46 @@ export async function createDeskApi(options: DeskOptions): Promise<DeskApi> {
     send(res, 200, { ok: true, activated: payload.result });
   }
 
+  function model(): Promise<AskModel> {
+    if (askModel === null) {
+      askModel = startClaudeJsonSession({ name: "blip-desk-ask", instructions: ASK_INSTRUCTIONS, model: "sonnet" });
+      askModel.catch(() => { askModel = null; });
+    }
+    return askModel;
+  }
+
+  async function ask(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!options.claude && !options.askModel) return send(res, 501, { ok: false, error: "no-ai", message: "Ask needs Blip started with the Claude brain." });
+    let body: unknown;
+    try { body = await readJsonBody(req); } catch { return send(res, 400, { ok: false, error: "invalid-body" }); }
+    const record = typeof body === "object" && body !== null ? body as Record<string, unknown> : {};
+    const goal = typeof record.goal === "string" ? record.goal.trim().slice(0, MAX_ASK_CHARS) : "";
+    let question = typeof record.question === "string" ? record.question.trim().slice(0, MAX_ASK_CHARS) : "";
+    if (question === "" && goal === "") return send(res, 400, { ok: false, error: "empty-question", message: "Type a question or a goal first." });
+    if (question === "") question = "What on this page helps with my goal, and what should I do next?";
+    if (outlineIdentity === null || lastOutline === null) return send(res, 409, { ok: false, error: "no-outline", message: "Press F5 for the page outline first." });
+    if (asking) return send(res, 409, { ok: false, error: "busy", message: "Still working on the last question." });
+    asking = true;
+    const identity = outlineIdentity;
+    try {
+      const executor = options.executor();
+      const result = await askAboutPage(await model(), {
+        async readRegion(id) {
+          const read = await executor.execute({ op: "read-region", regionId: id, identity });
+          return read.ok && read.payload.ok && read.payload.operation === "read-region" ? read.payload.result : null;
+        },
+        async regionControls(id) {
+          const read = await executor.execute({ op: "region-controls", regionId: id, identity });
+          return read.ok && read.payload.ok && read.payload.operation === "region-controls" ? read.payload.result.controls : null;
+        },
+      }, lastOutline, goal, question);
+      send(res, 200, { ok: true, ask: result });
+    } catch (error) {
+      log("warn", { msg: "desk ask failed", code: error instanceof Error ? error.message.slice(0, 120) : "unknown" });
+      send(res, 502, { ok: false, error: "ai-failed", message: "Claude couldn't answer just now. Try again in a moment." });
+    } finally { asking = false; }
+  }
+
   async function back(res: ServerResponse): Promise<void> {
     const previous = history.at(-1);
     if (previous === undefined) return send(res, 409, { ok: false, error: "no-history", message: "There's no earlier page to go back to." });
@@ -174,6 +225,7 @@ export async function createDeskApi(options: DeskOptions): Promise<DeskApi> {
         else if (req.method === "GET" && pathname === "/desk/controls") await controls(res, search.get("id"));
         else if (req.method === "POST" && pathname === "/desk/activate") await activate(req, res);
         else if (req.method === "POST" && pathname === "/desk/back") await back(res);
+        else if (req.method === "POST" && pathname === "/desk/ask") await ask(req, res);
         else send(res, 404, { ok: false, error: "not-found" });
       } catch (error) {
         log("warn", { msg: "desk request failed", code: error instanceof Error ? error.name : "unknown" });

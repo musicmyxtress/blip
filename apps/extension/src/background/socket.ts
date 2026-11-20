@@ -6,6 +6,7 @@ import { dispatchActRequest } from "./acts.js";
 import { dispatchBrowserRequest } from "./browser.js";
 
 declare const __BLIP_WS_URL__: string;
+declare const __BLIP_BUILD_ID__: string;
 
 const DEFAULT_SOCKET_URL = `ws://${LOOPBACK_HOST}:${DEFAULT_PORT}${WS_PATH}`;
 const SOCKET_URL = typeof __BLIP_WS_URL__ === "string" ? __BLIP_WS_URL__ : DEFAULT_SOCKET_URL;
@@ -125,6 +126,32 @@ function dispatch(message: Message, socketForReply: WebSocket): void {
   // Remaining server-to-extension messages are intentionally inert in this first shell.
 }
 
+/**
+ * The local server reports the id of the extension build it last made. When that differs from the
+ * id baked into this running copy, Chrome is still running an old build: reload to pick up the new
+ * one. A once-per-id guard in session storage prevents a reload loop if the folder Chrome loaded
+ * from is not the one the server builds into.
+ */
+async function reloadIfServerHasNewerBuild(): Promise<void> {
+  const ownId = typeof __BLIP_BUILD_ID__ === "string" ? __BLIP_BUILD_ID__ : "";
+  if (ownId === "" || ownId.startsWith("__blip")) return;
+  try {
+    const base = SOCKET_URL.replace(/^ws:/, "http:").replace(/\/ws$/, "");
+    const response = await fetch(`${base}/_blip/extension-build`, { cache: "no-store" });
+    if (!response.ok) return;
+    const body = await response.json() as { buildId?: unknown };
+    const serverId = typeof body.buildId === "string" ? body.buildId : "";
+    if (!/^[0-9a-f]{16}$/.test(serverId) || serverId === ownId) return;
+    const key = "blipReloadedFor";
+    const stored = await chrome.storage.session.get(key);
+    if (stored[key] === serverId) return;
+    await chrome.storage.session.set({ [key]: serverId });
+    chrome.runtime.reload();
+  } catch {
+    // The check is a convenience: any failure leaves the running build in place.
+  }
+}
+
 export function ensureConnected(): void {
   if (!isAllowedSocketUrl(SOCKET_URL)) return;
   if (!socketState.canReconnect()) return;
@@ -147,6 +174,7 @@ export function ensureConnected(): void {
       if (message.type === "welcome" && message.replyTo === welcomeId) {
         welcomed = true;
         notifySocketWelcome();
+        void reloadIfServerHasNewerBuild();
         pingTimer = setInterval(() => {
           if (current.readyState !== WebSocket.OPEN) return;
           socketState.onPing();

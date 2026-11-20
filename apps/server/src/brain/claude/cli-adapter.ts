@@ -59,7 +59,7 @@ function modelFor(role: AgyRole, config: AgyRoleConfig, options: ClaudeCliAdapte
   return options.models?.[role] ?? config.env[envKey] ?? DEFAULT_MODELS[role];
 }
 
-export function claudeCliArgs(role: AgyRole, model: string): string[] {
+export function claudeCliArgs(role: AgyRole, model: string, instructions: string = ROLE_INSTRUCTIONS[role]): string[] {
   return [
     "-p",
     "--input-format", "stream-json",
@@ -71,7 +71,7 @@ export function claudeCliArgs(role: AgyRole, model: string): string[] {
     "--disable-slash-commands",
     "--no-session-persistence",
     "--model", model,
-    "--system-prompt", ROLE_INSTRUCTIONS[role],
+    "--system-prompt", instructions,
   ];
 }
 
@@ -102,15 +102,18 @@ class ClaudeRoleSession implements AgyRoleSession {
   #pending: Pending | null = null;
   #closed = false;
 
-  constructor(config: AgyRoleConfig, options: ClaudeCliAdapterOptions) {
+  #override: { instructions: string; model: string } | undefined;
+
+  constructor(config: AgyRoleConfig, options: ClaudeCliAdapterOptions, override?: { instructions: string; model: string }) {
+    this.#override = override;
     this.#config = config;
     this.#options = options;
   }
 
   start(onCliEvent?: (event: AgyCliEventCategory) => void): Promise<AgyCliStartupInfo> {
     const executable = this.#options.executable ?? this.#config.env.CLAUDE_CLI_PATH ?? "claude";
-    const model = modelFor(this.#config.role, this.#config, this.#options);
-    const child = spawn(executable, claudeCliArgs(this.#config.role, model), {
+    const model = this.#override?.model ?? modelFor(this.#config.role, this.#config, this.#options);
+    const child = spawn(executable, claudeCliArgs(this.#config.role, model, this.#override?.instructions), {
       cwd: this.#config.cwd,
       env: this.#config.env,
       stdio: "pipe",
@@ -217,6 +220,45 @@ class ClaudeRoleSession implements AgyRoleSession {
     }
     this.#closed = true;
   }
+}
+
+/**
+ * A standalone tool-less Claude session with custom instructions, for roles outside the AGY manager
+ * (the desk's Ask). Same isolation flags; runs in a fresh empty temp directory with API-key
+ * variables removed so the subscription login is used. Throws if the CLI reports any tool.
+ */
+export async function startClaudeJsonSession(options: { name: string; instructions: string; model: string; executable?: string }): Promise<{
+  call(prompt: string, signal?: AbortSignal): Promise<string>;
+  close(): Promise<void>;
+}> {
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const cwd = await mkdtemp(join(tmpdir(), "blip-desk-claude-"));
+  const env = { ...process.env };
+  for (const key of ["ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"]) delete env[key];
+  const session = new ClaudeRoleSession(
+    { role: "content", agent: options.name, model: options.model, cwd, env },
+    options.executable ? { executable: options.executable } : {},
+    { instructions: options.instructions, model: options.model },
+  );
+  const started = session.start();
+  // stream-json sessions emit init on the first message; send a fixed readiness prompt with it.
+  const ready = session.call('Reply with exactly {"ready":true}');
+  const init = await started;
+  if (init.agent !== options.name || !Array.isArray(init.tools) || init.tools.length !== 0) {
+    await session.close();
+    await rm(cwd, { recursive: true, force: true }).catch(() => {});
+    throw new Error("Claude desk session was not isolated (tools reported).");
+  }
+  await ready;
+  return {
+    call: (prompt, signal) => session.call(prompt, signal),
+    async close() {
+      await session.close();
+      await rm(cwd, { recursive: true, force: true }).catch(() => {});
+    },
+  };
 }
 
 export function createClaudeCliAdapter(options: ClaudeCliAdapterOptions = {}): AgyCliAdapter {

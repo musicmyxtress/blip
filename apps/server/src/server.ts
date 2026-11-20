@@ -96,8 +96,10 @@ export type StartServerOptions = {
   intentWatchdog?: { schedule(callback: () => void, delayMs: number): unknown; cancel(handle: unknown): void };
   /** Optional static roots (voice build, form fixtures). Behind the same Host check as everything else. */
   staticRoots?: StaticRoot[];
+  /** The id of the latest extension build, reported at /_blip/extension-build so the extension can reload itself. */
+  extensionBuildId?: string;
   /** Enable the token-protected desk API for the native front end (writes a token file). */
-  desk?: boolean | { tokenPath?: string };
+  desk?: boolean | { tokenPath?: string; claude?: boolean };
 };
 
 /** Resolved settings the later plans read (fake brain delay, snapshot timeout). */
@@ -146,6 +148,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
     ? await createDeskApi({
         executor: () => createBrowserExecutor({ hub: deskHub!, session }),
         ...(typeof options.desk === "object" && options.desk.tokenPath !== undefined ? { tokenPath: options.desk.tokenPath } : {}),
+        ...(typeof options.desk === "object" && options.desk.claude ? { claude: true } : {}),
       })
     : null;
 
@@ -170,6 +173,10 @@ export async function startServer(options: StartServerOptions = {}): Promise<Run
       const search = new URL(req.url ?? "/", "http://x").searchParams;
       void desk.handle(req, res, pathname, search);
       return;
+    }
+    if (req.method === "GET" && pathname === "/_blip/extension-build") {
+      res.setHeader("Cache-Control", "no-store");
+      return json(res, 200, { buildId: options.extensionBuildId ?? null });
     }
     // /healthz stays ahead of static roots so a static file can never shadow it.
     if (req.method === "GET" && pathname === "/healthz") return json(res, 200, { ok: true });

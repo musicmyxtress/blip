@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -34,7 +35,7 @@ export async function buildExtension(options: { socketUrl?: string; watch?: bool
     platform: "browser" as const,
     target: "chrome116",
     sourcemap: false,
-    define: { __BLIP_WS_URL__: JSON.stringify(socketUrl) },
+    define: { __BLIP_WS_URL__: JSON.stringify(socketUrl), __BLIP_BUILD_ID__: JSON.stringify(BUILD_ID_PLACEHOLDER) },
     logLevel: "info" as const,
   };
   if (options.watch) {
@@ -53,7 +54,9 @@ export async function buildExtension(options: { socketUrl?: string; watch?: bool
     return;
   }
 
-  await build({
+  // Build in memory, hash the output (with a placeholder id), then embed the hash as the build id.
+  // Same code gives the same id, so the extension only reloads itself when its code really changed.
+  const result = await build({
     ...common,
     entryPoints: [
       { in: path.join(here, "src/background/index.ts"), out: "background" },
@@ -62,7 +65,23 @@ export async function buildExtension(options: { socketUrl?: string; watch?: bool
       { in: path.join(here, "src/content/submit-guard-entry.ts"), out: "submit-event-guard" },
     ],
     outdir: output,
+    write: false,
   });
+  const hash = createHash("sha256");
+  hash.update(manifestText);
+  for (const file of [...result.outputFiles].sort((a, b) => a.path.localeCompare(b.path))) hash.update(file.text);
+  const buildId = hash.digest("hex").slice(0, 16);
+  for (const file of result.outputFiles) {
+    await writeFile(file.path, file.text.split(BUILD_ID_PLACEHOLDER).join(buildId));
+  }
+  await writeFile(path.join(output, "build-id.txt"), buildId);
+}
+
+const BUILD_ID_PLACEHOLDER = "__blip_build_id_placeholder__";
+
+/** The id of the most recent extension build, or null when there is none. */
+export async function readExtensionBuildId(): Promise<string | null> {
+  try { return (await readFile(path.join(output, "build-id.txt"), "utf8")).trim() || null; } catch { return null; }
 }
 
 if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -12,7 +12,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_PORT, LOOPBACK_HOST, WS_PATH } from "@blip/protocol";
-import { buildExtension } from "../apps/extension/build.js";
+import { buildExtension, readExtensionBuildId } from "../apps/extension/build.js";
 import { startServer, type RunningServer } from "../apps/server/src/server.js";
 import { createClaudeCliAdapter } from "../apps/server/src/brain/claude/cli-adapter.js";
 import { discoverLocalWhisper } from "../apps/server/src/voice/local-whisper";
@@ -73,7 +73,8 @@ async function main(): Promise<number> {
       ...(brain === "claude" ? { agyAdapter: createClaudeCliAdapter() } : {}),
       deferAgyStartup: true,
       dialogueRunner: true,
-      desk: true,
+      desk: { claude: brain === "claude" },
+      ...(await readExtensionBuildId().then((id) => (id ? { extensionBuildId: id } : {}))),
       repairCacheDirectory: demoRepairCachePath(),
       staticRoots: [demoVoiceStaticRoot()],
       voiceBuildId,

@@ -242,6 +242,7 @@ export function buildOutline(document: Document): PageOutline {
   regionsByDocument.set(document, map);
   sectionEnds.clear();
   sectionColumns.clear();
+  controlsByDocument.delete(document);
   const regions: OutlineRegion[] = [];
   const idByElement = new Map<Element, string>();
   let truncated = false;
@@ -556,8 +557,9 @@ export function regionControls(document: Document, regionId: string): RegionCont
   const elements = regionScopeControls(document, regionId);
   if (elements === null) return null;
   const pageUrl = document.location?.href ?? "";
-  const map = new Map<string, ControlEntry>();
-  controlsByDocument.set(document, map);
+  let map = controlsByDocument.get(document);
+  if (!map) { map = new Map<string, ControlEntry>(); controlsByDocument.set(document, map); }
+  if (map.size > 2000) map.clear();
   const controls: RegionControlsResult["controls"] = [];
   const seenLinks = new Map<string, number>();
   let truncated = false;

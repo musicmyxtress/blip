@@ -15,6 +15,7 @@ public sealed class MainForm : Form
 
     private readonly DeskClient _client = new();
     private readonly TextBox _goal = new() { Dock = DockStyle.Fill, AccessibleName = "Goal" };
+    private readonly TextBox _ask = new() { Dock = DockStyle.Fill, AccessibleName = "Ask Claude" };
     private readonly ListBox _page = new() { Dock = DockStyle.Fill, IntegralHeight = false, AccessibleName = "Page" };
     private readonly TextBox _content = new()
     {
@@ -36,7 +37,9 @@ public sealed class MainForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         KeyPreview = true;
 
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6, Padding = new Padding(8) };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 8, Padding = new Padding(8) };
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -45,14 +48,17 @@ public sealed class MainForm : Form
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 55));
 
         // Each label sits directly before its control in tab order, so screen readers use it as the name.
-        layout.Controls.Add(new Label { Text = "&Goal (what you're trying to do, optional)", AutoSize = true, TabIndex = 0 });
+        layout.Controls.Add(new Label { Text = "&Goal (what you're trying to do; Enter asks what helps)", AutoSize = true, TabIndex = 0 });
         _goal.TabIndex = 1;
         layout.Controls.Add(_goal);
-        layout.Controls.Add(new Label { Text = "&Page", AutoSize = true, TabIndex = 2, Margin = new Padding(3, 10, 3, 3) });
-        _page.TabIndex = 3;
+        layout.Controls.Add(new Label { Text = "&Ask Claude about this page (Enter to ask)", AutoSize = true, TabIndex = 2, Margin = new Padding(3, 10, 3, 3) });
+        _ask.TabIndex = 3;
+        layout.Controls.Add(_ask);
+        layout.Controls.Add(new Label { Text = "&Page", AutoSize = true, TabIndex = 4, Margin = new Padding(3, 10, 3, 3) });
+        _page.TabIndex = 5;
         layout.Controls.Add(_page);
-        layout.Controls.Add(new Label { Text = "&Content", AutoSize = true, TabIndex = 4, Margin = new Padding(3, 10, 3, 3) });
-        _content.TabIndex = 5;
+        layout.Controls.Add(new Label { Text = "&Content", AutoSize = true, TabIndex = 6, Margin = new Padding(3, 10, 3, 3) });
+        _content.TabIndex = 7;
         layout.Controls.Add(_content);
 
         var statusStrip = new StatusStrip();
@@ -61,6 +67,18 @@ public sealed class MainForm : Form
         Controls.Add(statusStrip);
 
         _page.KeyDown += OnPageKeyDown;
+        _ask.KeyDown += async (_, e) =>
+        {
+            if (e.KeyCode != Keys.Enter) return;
+            e.Handled = e.SuppressKeyPress = true;
+            await AskClaudeAsync(_ask.Text);
+        };
+        _goal.KeyDown += async (_, e) =>
+        {
+            if (e.KeyCode != Keys.Enter) return;
+            e.Handled = e.SuppressKeyPress = true;
+            await AskClaudeAsync("");
+        };
         _page.DoubleClick += async (_, _) => await OpenSelectedAsync(direct: false);
         _content.KeyDown += (_, e) =>
         {
@@ -303,6 +321,54 @@ public sealed class MainForm : Form
         ShowMessage("The new page is taking a while. Press F5 when it has loaded.");
     }
 
+    /// <summary>Asks Claude about the current page with the goal; shows the answer and its suggested actions.</summary>
+    private async Task AskClaudeAsync(string question)
+    {
+        if (_busy) return;
+        if (_outline is null) { SetStatus("Press F5 for the page outline first."); return; }
+        if (string.IsNullOrWhiteSpace(question) && string.IsNullOrWhiteSpace(_goal.Text))
+        {
+            SetStatus("Type a goal or a question first.");
+            return;
+        }
+        _busy = true;
+        SetStatus("Asking Claude. This can take up to half a minute.");
+        Text = $"Blip Desk - asking Claude - {_outline.Title}";
+        try
+        {
+            var reply = await _client.AskAsync(_goal.Text.Trim(), question.Trim());
+            _busy = false;
+            Text = $"Blip Desk - {_outline.Title}";
+            var heading = string.IsNullOrWhiteSpace(question) ? "Goal check" : $"Answer to: {question.Trim()}";
+            _content.Text = $"{heading}{Environment.NewLine}{reply.Answer}";
+            Push(new View("Claude's answer", () => BuildAnswer(reply)));
+            SetStatus("Claude answered. Escape goes back to the page.");
+        }
+        catch (DeskException ex)
+        {
+            _busy = false;
+            Text = $"Blip Desk - {_outline.Title}";
+            SetStatus(ex.Message);
+            _ask.Focus();
+        }
+    }
+
+    private static List<PageEntry> BuildAnswer(AskAnswer reply)
+    {
+        var entries = new List<PageEntry> { new(reply.Answer, EntryKind.Summary) };
+        foreach (var action in reply.Actions)
+        {
+            var c = action.Control;
+            var text = $"{c.Label}, {(c.Kind == "link" ? "link" : "button")}";
+            if (!string.IsNullOrWhiteSpace(action.Why)) text += $": {action.Why}";
+            if (c.Access == "confirm") text += $", asks first: {c.Note}";
+            else if (c.Access == "blocked") text += $", not allowed: {c.Note}";
+            entries.Add(new PageEntry(text, EntryKind.Control, c.Id, Control: c));
+        }
+        if (reply.Actions.Count == 0) entries.Add(new PageEntry("No suggested actions. Escape goes back to the page.", EntryKind.Summary));
+        return entries;
+    }
+
     private async Task BackPageAsync()
     {
         if (_busy) return;
@@ -354,7 +420,9 @@ public sealed class MainForm : Form
             "Escape: go back one level. From here, back to the Page list.",
             "Escape or Backspace at the top of the Page list, or Alt Left Arrow anywhere: back to the previous page.",
             "Control H: show or hide the hidden parts, such as ads and cookie banners.",
-            "Alt G, Alt P, Alt C: jump to Goal, Page, or Content.",
+            "Alt G, Alt A, Alt P, Alt C: jump to Goal, Ask, Page, or Content.",
+            "In Ask, type a question and press Enter. Claude's answer opens in the Page list, followed by suggested links or buttons. Claude never uses them; you choose.",
+            "In Goal, press Enter to ask what on this page helps with your goal. The goal stays set as you move between pages.",
             "The first line of every list says where you are.");
         _content.SelectionStart = 0;
         _content.Focus();

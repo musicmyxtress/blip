@@ -13,7 +13,7 @@ public sealed class DeskClient : IDisposable
 
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
 
-    private readonly HttpClient _http = new() { BaseAddress = new Uri("http://127.0.0.1:7777/"), Timeout = TimeSpan.FromSeconds(30) };
+    private readonly HttpClient _http = new() { BaseAddress = new Uri("http://127.0.0.1:7777/"), Timeout = TimeSpan.FromSeconds(120) };
 
     public async Task<PageOutline> GetOutlineAsync(CancellationToken cancel = default)
     {
@@ -38,6 +38,13 @@ public sealed class DeskClient : IDisposable
         var body = JsonSerializer.Serialize(new { id = controlId, confirm = confirmed });
         var response = await SendAsync("desk/activate", cancel, HttpMethod.Post, body);
         return response.Activated ?? throw new DeskException("Blip didn't confirm the action.");
+    }
+
+    public async Task<AskAnswer> AskAsync(string goal, string question, CancellationToken cancel = default)
+    {
+        var body = JsonSerializer.Serialize(new { goal, question });
+        var response = await SendAsync("desk/ask", cancel, HttpMethod.Post, body);
+        return response.Ask ?? throw new DeskException("Claude returned no answer.");
     }
 
     public async Task<BackResult> BackAsync(CancellationToken cancel = default)
@@ -83,6 +90,7 @@ public sealed class DeskClient : IDisposable
         "restricted-page" => "This page can't be read, for example a Chrome settings page.",
         "stale-page" or "stale-capture" => "The page changed. Press F5 to get a fresh outline.",
         "no-outline" => "Press F5 to get the page outline first.",
+        "no-ai" or "ai-failed" or "busy" or "empty-question" => message ?? "Claude isn't available right now.",
         "no-history" => message ?? "There's no earlier page to go back to.",
         "not-found" => message ?? "That part of the page is gone. Press F5 to refresh.",
         "unauthorized" when message is not null => message,
@@ -105,6 +113,20 @@ public sealed class DeskResponse
     public RegionControls? Controls { get; set; }
     public ActivateResult? Activated { get; set; }
     public BackResult? Back { get; set; }
+    public AskAnswer? Ask { get; set; }
+}
+
+public sealed class AskAnswer
+{
+    public string Answer { get; set; } = "";
+    public List<string> RegionIds { get; set; } = [];
+    public List<AskAction> Actions { get; set; } = [];
+}
+
+public sealed class AskAction
+{
+    public DeskControl Control { get; set; } = new();
+    public string Why { get; set; } = "";
 }
 
 public sealed class BackResult
