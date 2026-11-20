@@ -40,6 +40,36 @@ public sealed class DeskClient : IDisposable
         return response.Activated ?? throw new DeskException("Blip didn't confirm the action.");
     }
 
+    /// <summary>Fields in one part of the page, or on the whole page when regionId is null.</summary>
+    public async Task<FieldsResult> GetFieldsAsync(string? regionId, CancellationToken cancel = default)
+    {
+        var response = await SendAsync($"desk/fields?id={Uri.EscapeDataString(regionId ?? "page")}", cancel);
+        return response.Fields ?? throw new DeskException("Blip returned no form fields.");
+    }
+
+    /// <summary>Opens a list-style field on the page and returns the choices it shows.</summary>
+    public async Task<FieldOptionsResult> GetFieldOptionsAsync(string fieldId, string filter, CancellationToken cancel = default)
+    {
+        var body = JsonSerializer.Serialize(new { id = fieldId, filter });
+        var response = await SendAsync("desk/field-options", cancel, HttpMethod.Post, body);
+        return response.Options ?? throw new DeskException("Blip returned no choices.");
+    }
+
+    public Task<SetFieldResult> SetFieldTextAsync(string fieldId, string value, CancellationToken cancel = default) =>
+        SetFieldAsync(JsonSerializer.Serialize(new { id = fieldId, value }), cancel);
+
+    public Task<SetFieldResult> SetFieldCheckedAsync(string fieldId, bool isChecked, CancellationToken cancel = default) =>
+        SetFieldAsync(JsonSerializer.Serialize(new { id = fieldId, @checked = isChecked }), cancel);
+
+    public Task<SetFieldResult> SetFieldOptionAsync(string fieldId, int option, CancellationToken cancel = default) =>
+        SetFieldAsync(JsonSerializer.Serialize(new { id = fieldId, option }), cancel);
+
+    private async Task<SetFieldResult> SetFieldAsync(string body, CancellationToken cancel)
+    {
+        var response = await SendAsync("desk/set-field", cancel, HttpMethod.Post, body);
+        return response.Set ?? throw new DeskException("Blip didn't confirm the change.");
+    }
+
     public async Task<AskAnswer> AskAsync(string goal, string question, CancellationToken cancel = default)
     {
         var body = JsonSerializer.Serialize(new { goal, question });
@@ -95,6 +125,7 @@ public sealed class DeskClient : IDisposable
         "not-found" => message ?? "That part of the page is gone. Press F5 to refresh.",
         "unauthorized" when message is not null => message,
         "invalid-target" => message ?? "That isn't allowed.",
+        "exception" when message is not null => message,
         _ => message ?? $"Blip reported a problem: {code ?? "unknown"}.",
     };
 
@@ -114,6 +145,55 @@ public sealed class DeskResponse
     public ActivateResult? Activated { get; set; }
     public BackResult? Back { get; set; }
     public AskAnswer? Ask { get; set; }
+    public FieldsResult? Fields { get; set; }
+    public FieldOptionsResult? Options { get; set; }
+    public SetFieldResult? Set { get; set; }
+}
+
+public sealed class FieldsResult
+{
+    public string? Id { get; set; }
+    public List<DeskField> Fields { get; set; } = [];
+    public List<DeskControl> Controls { get; set; } = [];
+    public bool Truncated { get; set; }
+}
+
+public sealed class DeskField
+{
+    public string Id { get; set; } = "";
+    /// <summary>text, textarea, select, checkbox, radio, combobox, or other.</summary>
+    public string Kind { get; set; } = "";
+    public string InputType { get; set; } = "";
+    public string Label { get; set; } = "";
+    public string? Value { get; set; }
+    public bool Sensitive { get; set; }
+    public bool Required { get; set; }
+    public bool Disabled { get; set; }
+    public bool ReadOnly { get; set; }
+    public bool? Checked { get; set; }
+    public string Invalid { get; set; } = "";
+    public string Hint { get; set; } = "";
+    public List<FieldOption>? Options { get; set; }
+    public int? MaxLength { get; set; }
+}
+
+public sealed class FieldOption
+{
+    public string Label { get; set; } = "";
+    public bool Selected { get; set; }
+}
+
+public sealed class FieldOptionsResult
+{
+    public string FieldId { get; set; } = "";
+    public List<FieldOption> Options { get; set; } = [];
+    public bool Truncated { get; set; }
+}
+
+public sealed class SetFieldResult
+{
+    public DeskField Field { get; set; } = new();
+    public string Detail { get; set; } = "";
 }
 
 public sealed class AskAnswer

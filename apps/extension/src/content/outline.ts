@@ -7,6 +7,7 @@
 // Read-only: nothing here changes the page.
 import { classifyAction, classifyBrowserLink } from "@blip/policy/classify";
 import { isVisible } from "./visibility.js";
+import { beginOneSubmitAllowance } from "./submit-guard.js";
 
 export type OutlineRegionKind =
   | "main" | "navigation" | "banner" | "contentinfo" | "complementary" | "search" | "form"
@@ -92,7 +93,7 @@ const COOKIE_TEXT = /\b(cookie|cookies|consent|gdpr)\b/i;
 let nextRegionNumber = 0;
 const regionsByDocument = new WeakMap<Document, Map<string, Element>>();
 
-function textOf(element: Element, max: number): string {
+export function textOf(element: Element, max: number): string {
   const raw = (element as HTMLElement).innerText ?? element.textContent ?? "";
   return raw.replace(/\s+/g, " ").trim().slice(0, max);
 }
@@ -560,8 +561,8 @@ function rateControl(element: Element, entry: { kind: "link" | "button"; label: 
   return { access: "confirm", note: inForm ? "may submit a form" : "may change something" };
 }
 
-/** Elements belonging to a region: its element subtree, or for heading sections the heading's range. */
-function regionScopeControls(document: Document, regionId: string): Element[] | null {
+/** Elements matching `selector` that belong to a region: its subtree, or for heading sections the heading's range. */
+export function regionScopeElements(document: Document, regionId: string, selector: string): Element[] | null {
   const element = regionsByDocument.get(document)?.get(regionId);
   if (!element || !element.isConnected) return null;
   if (sectionEnds.has(regionId)) {
@@ -570,10 +571,14 @@ function regionScopeControls(document: Document, regionId: string): Element[] | 
     range.setStartBefore(element);
     const end = sectionEnds.get(regionId);
     if (end && end.isConnected) range.setEndBefore(end); else range.setEndAfter(column.lastChild ?? element);
-    return [...column.querySelectorAll(CONTROL_SELECTOR)].filter((candidate) => range.intersectsNode(candidate));
+    return [...column.querySelectorAll(selector)].filter((candidate) => range.intersectsNode(candidate));
   }
-  const inside = [...element.querySelectorAll(CONTROL_SELECTOR)];
-  return element.matches(CONTROL_SELECTOR) ? [element, ...inside] : inside;
+  const inside = [...element.querySelectorAll(selector)];
+  return element.matches(selector) ? [element, ...inside] : inside;
+}
+
+function regionScopeControls(document: Document, regionId: string): Element[] | null {
+  return regionScopeElements(document, regionId, CONTROL_SELECTOR);
 }
 
 export type RegionControlsResult = {
@@ -585,6 +590,17 @@ export type RegionControlsResult = {
 export function regionControls(document: Document, regionId: string): RegionControlsResult | null {
   const elements = regionScopeControls(document, regionId);
   if (elements === null) return null;
+  return { id: regionId, ...mintControls(document, elements, MAX_CONTROLS) };
+}
+
+/** Buttons that act on a form: everything matching the control selector except real links. */
+export function formButtons(document: Document, scope: Element[], max: number): RegionControlsResult["controls"] {
+  const buttons = scope.filter((element) => controlKind(element).kind === "button");
+  return mintControls(document, buttons, max).controls;
+}
+
+/** Mint control ids for visible, labelled elements, merging links to the same address. */
+function mintControls(document: Document, elements: Element[], max: number): { controls: RegionControlsResult["controls"]; truncated: boolean } {
   const pageUrl = document.location?.href ?? "";
   let map = controlsByDocument.get(document);
   if (!map) { map = new Map<string, ControlEntry>(); controlsByDocument.set(document, map); }
@@ -607,7 +623,7 @@ export function regionControls(document: Document, regionId: string): RegionCont
       }
     }
     if (label === "" && kind === "button") continue;
-    if (controls.length >= MAX_CONTROLS) { truncated = true; break; }
+    if (controls.length >= max) { truncated = true; break; }
     nextControlNumber += 1;
     const id = `c${nextControlNumber}`;
     const rating = rateControl(element, { kind, label, href }, pageUrl);
@@ -615,8 +631,10 @@ export function regionControls(document: Document, regionId: string): RegionCont
     if (kind === "link" && href !== null) seenLinks.set(href, controls.length);
     controls.push({ id, kind, label: label || (hostOf(href) ?? "Unlabelled link"), host: kind === "link" ? hostOf(href) : null, ...rating });
   }
-  return { id: regionId, controls, truncated };
+  return { controls, truncated };
 }
+
+export { CONTROL_SELECTOR };
 
 export type ActivateOutcome =
   | { ok: true; result: { kind: "link"; href: string; access: "direct" | "confirm" } | { kind: "button" } }
@@ -636,8 +654,29 @@ export function activateControl(document: Document, controlId: string, confirmed
   if (rating.access === "blocked") return { ok: false, code: "invalid-target", message: `Not allowed: ${rating.note}.` };
   if (rating.access === "confirm" && !confirmed) return { ok: false, code: "unauthorized", message: `This needs your yes first: ${rating.note}.` };
   if (entry.kind === "link") return { ok: true, result: { kind: "link", href: entry.href!, access: rating.access } };
+  const form = submitTarget(element);
+  if (form !== null && confirmed) {
+    // The user said yes to this exact button: let its one submission through Blip's submit guard.
+    let release: (() => void) | null = null;
+    try { release = beginOneSubmitAllowance(form, element as HTMLElement); } catch { /* guard missing: the click stays blocked */ }
+    try { (element as HTMLElement).click(); } finally { release?.(); }
+    return { ok: true, result: { kind: "button" } };
+  }
   (element as HTMLElement).click();
   return { ok: true, result: { kind: "button" } };
+}
+
+/** The form a button would submit, or null when it isn't a submit button. */
+function submitTarget(element: Element): HTMLFormElement | null {
+  if (element.localName === "button") {
+    const button = element as HTMLButtonElement;
+    return button.type === "submit" ? button.form : null;
+  }
+  if (element.localName === "input") {
+    const input = element as HTMLInputElement;
+    return input.type === "submit" || input.type === "image" ? input.form : null;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------------------------

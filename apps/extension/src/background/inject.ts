@@ -30,7 +30,8 @@ export async function injectExistingTabs(): Promise<void> {
       Promise.resolve().then(() =>
         chrome.scripting.executeScript({
           target: { tabId: tab.id, allFrames: true },
-          files: ["content.js"],
+          // The submit guard first: tabs open before a reload never ran its document-start copy.
+          files: ["submit-event-guard.js", "content.js"],
         }),
       ),
     ),

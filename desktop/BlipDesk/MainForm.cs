@@ -7,6 +7,7 @@ namespace BlipDesk;
 //   Control+Enter on a list item: open its main link straight away
 //   Escape        go back one level (from Content, back to the list)
 //   Control+H     show or hide the hidden parts (ads, cookie banners, off-screen frames)
+//   Alt+F         every form field on the page, as real controls (see FormDialog)
 //   Alt+G / Alt+P / Alt+C   jump to Goal, Page, Content
 public sealed class MainForm : Form
 {
@@ -105,6 +106,9 @@ public sealed class MainForm : Form
                 return true;
             case Keys.Alt | Keys.Left:
                 _ = BackPageAsync();
+                return true;
+            case Keys.Alt | Keys.F:
+                _ = OpenFormAsync(null, "Form fields on this page");
                 return true;
         }
         return base.ProcessCmdKey(ref msg, keyData);
@@ -212,6 +216,12 @@ public sealed class MainForm : Form
                 Push(new View(listTitle, () => PageView.BuildItems(list, listTitle), ReturnToId: list.Id));
                 break;
 
+            case EntryKind.Region when entry.Region is { Kind: "form" or "search", Fields: > 0 } form:
+                await OpenFormAsync(form.Id, PageView.Name(form));
+                break;
+            case EntryKind.Fields when entry.Id is not null:
+                await OpenFormAsync(entry.Id, _views.Peek().Title);
+                break;
             case EntryKind.Region when entry.Id is not null:
                 await OpenChoicesAsync(entry.Id, entry.Region is null ? entry.Text : PageView.Name(entry.Region), direct: false);
                 break;
@@ -249,14 +259,15 @@ public sealed class MainForm : Form
             if (main is not null) { await ActivateAsync(main); return; }
             SetStatus("This item has no link to open. Showing its choices.");
         }
-        if (controls.Controls.Count == 0 && !direct)
+        var fieldCount = _outline?.Regions.FirstOrDefault(r => r.Id == regionId)?.Fields ?? 0;
+        if (controls.Controls.Count == 0 && fieldCount == 0 && !direct)
         {
             // Nothing to choose: just read it.
             await ReadAsync(regionId);
             return;
         }
         var returnTo = regionId;
-        Push(new View(title, () => PageView.BuildControls(title, regionId, controls), ReturnToId: returnTo));
+        Push(new View(title, () => PageView.BuildControls(title, regionId, controls, fieldCount), ReturnToId: returnTo));
     }
 
     private async Task ReadAsync(string regionId)
@@ -278,15 +289,32 @@ public sealed class MainForm : Form
         finally { _busy = false; }
     }
 
-    private async Task ActivateAsync(DeskControl control)
+    /// <summary>Opens the form mirror for one part (or the whole page), then presses the button chosen there.</summary>
+    private async Task OpenFormAsync(string? regionId, string title)
+    {
+        if (_busy) return;
+        if (_outline is null) { SetStatus("Press F5 for the page outline first."); return; }
+        DeskControl? chosen;
+        bool confirmed;
+        using (var dialog = new FormDialog(_client, regionId, title))
+        {
+            dialog.ShowDialog(this);
+            chosen = dialog.Chosen;
+            confirmed = dialog.Confirmed;
+        }
+        if (chosen is not null) await ActivateAsync(chosen, confirmed);
+        else { SetStatus("Form closed. Your changes are on the page."); _page.Focus(); }
+    }
+
+    private async Task ActivateAsync(DeskControl control, bool alreadyConfirmed = false)
     {
         if (control.Access == "blocked")
         {
             SetStatus($"{control.Label} is not allowed: {control.Note}.");
             return;
         }
-        var confirmed = false;
-        if (control.Access == "confirm")
+        var confirmed = alreadyConfirmed;
+        if (control.Access == "confirm" && !confirmed)
         {
             var what = control.Kind == "link" ? $"Open the link \"{control.Label}\"?" : $"Press the button \"{control.Label}\"?";
             var answer = MessageBox.Show(this, $"{what} It {control.Note}.", "Blip Desk: confirm",
@@ -436,6 +464,8 @@ public sealed class MainForm : Form
             "Escape: go back one level. From here, back to the Page list.",
             "Escape or Backspace at the top of the Page list, or Alt Left Arrow anywhere: back to the previous page.",
             "Control H: show or hide the hidden parts, such as ads and cookie banners.",
+            "Alt F: every form field on this page as normal Windows controls. Enter on a form or search part, or Fill in the form in a part's choices, opens just that part's fields.",
+            "In a form: Tab between fields. Each change goes to the page when you leave the field. Alt Down Arrow opens a list-style field's choices. The form's buttons are at the end, and a button that may send the form asks first and reads every field back. Blip never fills passwords or card numbers.",
             "Alt G, Alt A, Alt P, Alt C: jump to Goal, Ask, Page, or Content.",
             "In Ask, type a question and press Enter. Claude's answer opens in the Page list, followed by suggested links or buttons. Claude never uses them; you choose.",
             "In Goal, press Enter to ask what on this page helps with your goal. The goal stays set as you move between pages.",

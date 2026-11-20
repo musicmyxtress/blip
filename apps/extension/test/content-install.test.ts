@@ -42,11 +42,11 @@ describe("install-time content injection", () => {
     expect(executeScript).toHaveBeenCalledTimes(2);
     expect(executeScript).toHaveBeenNthCalledWith(1, {
       target: { tabId: 1, allFrames: true },
-      files: ["content.js"],
+      files: ["submit-event-guard.js", "content.js"],
     });
     expect(executeScript).toHaveBeenNthCalledWith(2, {
       target: { tabId: 2, allFrames: true },
-      files: ["content.js"],
+      files: ["submit-event-guard.js", "content.js"],
     });
   });
 

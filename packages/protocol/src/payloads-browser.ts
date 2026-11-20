@@ -74,6 +74,8 @@ const NonEmptyQuery = boundedText(500).refine((value) => value.trim().length > 0
 const RegionId = z.string().min(2).max(32).regex(/^r[0-9]{1,9}(\.[0-9]{1,4})?$/);
 /** Link/button ids issued by a region-controls read. */
 const ControlId = z.string().min(2).max(16).regex(/^c[0-9]{1,9}$/);
+/** A form field minted by region-fields; valid until the next outline. */
+const FieldId = z.string().min(2).max(16).regex(/^f[0-9]{1,9}$/);
 
 export const BrowserPageIdentity = z.object({
   captureId: BrowserId,
@@ -250,6 +252,25 @@ export const BrowserOperation = z.discriminatedUnion("op", [
    * button. `confirmed` is the user's explicit yes for controls rated "confirm"; "blocked" never runs.
    */
   z.object({ op: z.literal("activate-control"), controlId: ControlId, identity: BrowserPageIdentity, confirmed: z.boolean() }),
+  /** The form fields in one outline region, or on the whole page when regionId is null, plus their buttons. */
+  z.object({ op: z.literal("region-fields"), regionId: RegionId.nullable(), identity: BrowserPageIdentity }),
+  /** Open a combobox (typing `filter` first when it takes text) and list the choices it shows. */
+  z.object({ op: z.literal("field-options"), fieldId: FieldId, filter: z.string().max(200), identity: BrowserPageIdentity }),
+  /**
+   * Change one field: `value` for text, `checked` for a checkbox, `option` (an index into the field's
+   * listed options) for selects, radio groups and comboboxes. Never submits; password and card fields
+   * are refused.
+   */
+  z.object({
+    op: z.literal("set-field"),
+    fieldId: FieldId,
+    identity: BrowserPageIdentity,
+    value: z.string().max(10_000).optional(),
+    checked: z.boolean().optional(),
+    option: z.number().int().min(0).max(999).optional(),
+  }).refine((value) => [value.value, value.checked, value.option].filter((part) => part !== undefined).length === 1, {
+    message: "set-field takes exactly one of value, checked or option",
+  }),
 ]);
 export type BrowserOperation = z.infer<typeof BrowserOperation>;
 
@@ -333,6 +354,60 @@ export const BrowserRegionControlsResult = z.object({
 });
 export type BrowserRegionControlsResult = z.infer<typeof BrowserRegionControlsResult>;
 
+export const BrowserFieldOption = z.object({
+  label: boundedText(200),
+  selected: z.boolean(),
+}).strict();
+
+export const BrowserField = z.object({
+  id: FieldId,
+  kind: z.enum(["text", "textarea", "select", "checkbox", "radio", "combobox", "other"]),
+  /** The HTML input type (email, number, date…) or the ARIA role, for speech. */
+  inputType: boundedText(30),
+  label: boundedText(200),
+  /** Current value; null for password/card fields, which are never read. */
+  value: boundedText(10_000).nullable(),
+  sensitive: z.boolean(),
+  required: z.boolean(),
+  disabled: z.boolean(),
+  readOnly: z.boolean(),
+  checked: z.boolean().optional(),
+  /** The page's error message for this field, when it marks the field invalid. */
+  invalid: boundedText(300),
+  /** Help text the page links to the field. */
+  hint: boundedText(300),
+  options: z.array(BrowserFieldOption).max(300).optional(),
+  maxLength: z.number().int().min(-1).max(1_000_000).optional(),
+}).strict();
+export type BrowserField = z.infer<typeof BrowserField>;
+
+export const BrowserFieldsResult = z.object({
+  identity: BrowserPageIdentity,
+  id: RegionId.nullable(),
+  fields: z.array(BrowserField).max(150),
+  /** Buttons belonging to the fields' forms (submit, next step…), rated like any other button. */
+  controls: z.array(z.lazy(() => BrowserControl)).max(50),
+  truncated: z.boolean(),
+});
+export type BrowserFieldsResult = z.infer<typeof BrowserFieldsResult>;
+
+export const BrowserFieldOptionsResult = z.object({
+  identity: BrowserPageIdentity,
+  fieldId: FieldId,
+  options: z.array(BrowserFieldOption).max(300),
+  truncated: z.boolean(),
+});
+export type BrowserFieldOptionsResult = z.infer<typeof BrowserFieldOptionsResult>;
+
+export const BrowserSetFieldResult = z.object({
+  identity: BrowserPageIdentity,
+  /** The field read back from the page after the change. */
+  field: BrowserField,
+  /** Short note, e.g. "cut to 80 characters". */
+  detail: boundedText(200),
+});
+export type BrowserSetFieldResult = z.infer<typeof BrowserSetFieldResult>;
+
 export const BrowserActivateResult = z.object({
   tabId: TabId,
   kind: z.enum(["link", "button"]),
@@ -360,7 +435,8 @@ export type BrowserRequestPayload = z.infer<typeof BrowserRequestPayload>;
 
 export const BrowserOperationName = z.enum([
   "location", "capture", "navigate", "history", "reload", "search", "site-search", "tabs",
-  "list-links", "read-content", "read-item", "open-link", "scroll", "find", "outline", "read-region", "region-controls", "activate-control", "unknown",
+  "list-links", "read-content", "read-item", "open-link", "scroll", "find", "outline", "read-region", "region-controls", "activate-control",
+  "region-fields", "field-options", "set-field", "unknown",
 ]);
 
 const BrowserCommandResult = z.object({
@@ -429,6 +505,9 @@ const BrowserSuccess = z.discriminatedUnion("operation", [
   z.object({ ok: z.literal(true), requestId: BrowserId, operation: z.literal("read-region"), result: BrowserRegionResult }),
   z.object({ ok: z.literal(true), requestId: BrowserId, operation: z.literal("region-controls"), result: BrowserRegionControlsResult }),
   z.object({ ok: z.literal(true), requestId: BrowserId, operation: z.literal("activate-control"), result: BrowserActivateResult }),
+  z.object({ ok: z.literal(true), requestId: BrowserId, operation: z.literal("region-fields"), result: BrowserFieldsResult }),
+  z.object({ ok: z.literal(true), requestId: BrowserId, operation: z.literal("field-options"), result: BrowserFieldOptionsResult }),
+  z.object({ ok: z.literal(true), requestId: BrowserId, operation: z.literal("set-field"), result: BrowserSetFieldResult }),
 ]);
 
 const BrowserFailure = z.object({

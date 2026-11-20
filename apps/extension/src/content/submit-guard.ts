@@ -37,7 +37,16 @@ function registry(create: boolean): SubmitGuardRegistry | undefined {
   return created;
 }
 
-/** Install the default-deny submit listener once for this isolated-world document. */
+/** True during the few seconds after a real click or key press in this page (Chrome's transient activation). */
+function userIsActing(document: Document): boolean {
+  const activation = (document.defaultView?.navigator as (Navigator & { userActivation?: { isActive?: boolean } }) | undefined)?.userActivation;
+  return activation?.isActive === true;
+}
+
+/**
+ * Install the submit listener once for this isolated-world document. It denies submissions by
+ * default, except the user's own (see userIsActing) and one exact allowance granted by Blip.
+ */
 export function installPersistentSubmitGuard(document: Document = globalThis.document): boolean {
   const documents = registry(true)!.documents;
   if (documents.get(document)?.installed === true) return true;
@@ -56,6 +65,9 @@ export function installPersistentSubmitGuard(document: Document = globalThis.doc
       delete state.allowance;
       return;
     }
+    // The user's own click or key press in the page: their submission is theirs to make. Blip's
+    // synthetic clicks never grant user activation, so they still need an allowance.
+    if (userIsActing(document)) return;
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();

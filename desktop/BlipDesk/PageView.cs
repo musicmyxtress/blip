@@ -2,7 +2,7 @@ using System.Text.RegularExpressions;
 
 namespace BlipDesk;
 
-public enum EntryKind { Summary, Region, Item, ReadAll, Control, PageStep }
+public enum EntryKind { Summary, Region, Item, ReadAll, Control, PageStep, Fields }
 
 /// <summary>One line in the Page list.</summary>
 public sealed record PageEntry(string Text, EntryKind Kind, string? Id = null, OutlineRegion? Region = null, DeskControl? Control = null, bool Hidden = false)
@@ -165,7 +165,7 @@ public static partial class PageView
     }
 
     /// <summary>Choices for one part or list item: read its text, then each link and button.</summary>
-    public static List<PageEntry> BuildControls(string title, string regionId, RegionControls controls)
+    public static List<PageEntry> BuildControls(string title, string regionId, RegionControls controls, int fieldCount = 0)
     {
         var links = controls.Controls.Count(c => c.Kind == "link");
         var buttons = controls.Controls.Count - links;
@@ -178,6 +178,7 @@ public static partial class PageView
             new(summary, EntryKind.Summary),
             new("Read all text", EntryKind.ReadAll, regionId),
         };
+        if (fieldCount > 0) entries.Add(new PageEntry($"Fill in the form, {Count(fieldCount, "field")}", EntryKind.Fields, regionId));
         foreach (var control in controls.Controls)
         {
             var text = control.Kind == "link" ? $"{control.Label}, link" : $"{control.Label}, button";

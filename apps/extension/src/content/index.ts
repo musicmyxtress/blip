@@ -5,7 +5,7 @@ import { executeAct } from "./act.js";
 import { observeStructuralChanges } from "./observer.js";
 import { getHighlightOverlay } from "./overlay.js";
 import { captureFrameSnapshot } from "./snapshot.js";
-import { handleBrowserContentRequest } from "./browser-content.js";
+import { handleBrowserContentRequest, handleFieldRequest } from "./browser-content.js";
 export { captureFrameSnapshot } from "./snapshot.js";
 export { resolveElementId, walkDocument } from "./walk.js";
 
@@ -42,6 +42,11 @@ function installContentShell(): void {
     if (!("t" in message)) return;
     if (message.t === "browser-content" && "operation" in message && "identity" in message) {
       const request = message as Extract<BackgroundToContentMessage, { t: "browser-content" }>;
+      if (request.operation === "field-options" || request.operation === "set-field") {
+        // These wait for the page; keep the message channel open until they finish.
+        void handleFieldRequest(document, request, sender.frameId ?? 0).then(sendResponse);
+        return true;
+      }
       const response = handleBrowserContentRequest(document, request, sender.frameId ?? 0);
       sendResponse(response);
       return;

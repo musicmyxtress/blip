@@ -120,13 +120,14 @@ async function sendContent(
   dependencies: BrowserRequestDependencies,
   tabId: number,
   request: BrowserContentRequest,
+  timeoutMs = CONTENT_RESPONSE_TIMEOUT_MS,
 ): Promise<ContentSendOutcome> {
   const send = dependencies.sendContentMessage ?? sendBrowserContentRequest;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const response = await Promise.race([
       send(tabId, request),
-      new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), CONTENT_RESPONSE_TIMEOUT_MS); }),
+      new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), timeoutMs); }),
     ]);
     return response === null ? { ok: false, code: "timeout" } : { ok: true, response };
   } catch {
@@ -385,6 +386,35 @@ export function createBrowserRequestDispatcher(dependencies: BrowserRequestDepen
         return failure(requestId, "region-controls", "stale-capture", "That part of the page no longer matches the outline.");
       }
       return success(requestId, "region-controls", typed.result);
+    }
+
+    if (operation.op === "region-fields" || operation.op === "field-options" || operation.op === "set-field") {
+      const op = operation.op;
+      const identity = operation.identity;
+      const current = await liveCurrentTab(api, dependencies, identity.tabId, identity.pageUrl);
+      if (!current) return failure(requestId, op, "stale-page", "The page changed; refresh the outline.");
+      const message: BrowserContentRequest = op === "region-fields"
+        ? { t: "browser-content", operation: op, identity, regionId: operation.regionId }
+        : op === "field-options"
+          ? { t: "browser-content", operation: op, identity, fieldId: operation.fieldId, filter: operation.filter }
+          : {
+              t: "browser-content", operation: op, identity, fieldId: operation.fieldId,
+              ...(operation.value !== undefined ? { value: operation.value } : {}),
+              ...(operation.checked !== undefined ? { checked: operation.checked } : {}),
+              ...(operation.option !== undefined ? { option: operation.option } : {}),
+            };
+      // Opening a custom list can wait on the network; give field changes more time than reads.
+      const sent = await sendContent(dependencies, current.id, message, op === "region-fields" ? CONTENT_RESPONSE_TIMEOUT_MS : 6_000);
+      if (!sent.ok) return failure(requestId, op, sent.code, sent.code === "timeout"
+        ? "The page did not answer in time."
+        : "The top-level content frame is unavailable.");
+      const typed = sent.response as BrowserContentResponse;
+      const failed = contentFailure(requestId, op, typed);
+      if (failed) return failed;
+      if (typed.t !== "browser-content.result" || typed.operation !== op || !sameIdentity(identity, typed.result.identity)) {
+        return failure(requestId, op, "stale-capture", "The page changed before that could run.");
+      }
+      return success(requestId, op, typed.result);
     }
 
     if (operation.op === "activate-control") {

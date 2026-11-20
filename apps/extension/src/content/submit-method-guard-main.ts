@@ -17,12 +17,17 @@ export function installSubmitMethodGuard(target: Window & typeof globalThis): vo
     return;
   }
 
+  const browserSubmit = typeof current?.value === "function" ? current.value as (this: HTMLFormElement) => void : null;
   Object.defineProperty(formConstructor.prototype, "submit", {
     configurable: false,
     enumerable: false,
     writable: false,
-    value: function submit(): void {
-      // Direct submit deliberately has no path to the captured browser implementation.
+    value: function submit(this: HTMLFormElement): void {
+      // Pages call form.submit() from their own click handlers. Allow it only right after a real
+      // click or key press by the user (Chrome's transient activation), which Blip's synthetic
+      // events can never produce. Otherwise it stays a no-op.
+      const activation = (target.navigator as Navigator & { userActivation?: { isActive?: boolean } }).userActivation;
+      if (browserSubmit !== null && activation?.isActive === true) browserSubmit.call(this);
     },
   });
   Object.defineProperty(scope, SUBMIT_METHOD_GUARD_PROPERTY, {

@@ -12,6 +12,7 @@ import { classifyBrowserLink } from "@blip/policy/classify";
 import { boundedText } from "./text.js";
 import { isVisible } from "./visibility.js";
 import { activateControl, buildOutline, readRegion, regionControls } from "./outline.js";
+import { fieldOptions, regionFields, resetFields, setField } from "./fields.js";
 import { beginOneSubmitAllowance } from "./submit-guard.js";
 import type { BrowserContentRequest, BrowserContentResponse } from "../shared/messages.js";
 
@@ -673,6 +674,32 @@ function find(document: Document, request: Extract<BrowserContentRequest, { oper
   };
 }
 
+/** Field operations that wait for the page (opening a list, letting validation run). Top frame only. */
+export async function handleFieldRequest(
+  document: Document,
+  request: Extract<BrowserContentRequest, { operation: "field-options" | "set-field" }>,
+  frameId: number,
+): Promise<BrowserContentResponse> {
+  if (frameId !== 0) return failure(request, "unsupported-frame", "Form fields are supported only in the top-level frame.");
+  try {
+    if (request.operation === "field-options") {
+      const outcome = await fieldOptions(document, request.fieldId, request.filter);
+      if (!outcome.ok) return failure(request, outcome.code, outcome.message);
+      return { t: "browser-content.result", operation: "field-options", result: { identity: request.identity, fieldId: request.fieldId, options: outcome.options, truncated: outcome.truncated } };
+    }
+    const outcome = await setField(document, request.fieldId, {
+      ...(request.value !== undefined ? { value: request.value } : {}),
+      ...(request.checked !== undefined ? { checked: request.checked } : {}),
+      ...(request.option !== undefined ? { option: request.option } : {}),
+    });
+    if (!outcome.ok) return failure(request, outcome.code, outcome.message);
+    return { t: "browser-content.result", operation: "set-field", result: { identity: request.identity, field: outcome.field, detail: outcome.detail } };
+  } catch {
+    // Most likely the persistent submit guard is missing; never write without it.
+    return failure(request, "exception", "Blip couldn't safely change that field on this page.");
+  }
+}
+
 /** Execute only bounded read-only DOM operations in the extension isolated world. */
 export function handleBrowserContentRequest(
   document: Document,
@@ -699,6 +726,7 @@ export function handleBrowserContentRequest(
           viewport: { w: 0, h: 0, scrollY: 0 }, pageHeight: 0, regions: [], truncated: false,
         } };
       }
+      resetFields(document);
       return { t: "browser-content.result", operation: "outline", result: { ...request.identity, status: "supported", ...buildOutline(document) } };
     }
     case "read-region": {
@@ -716,6 +744,14 @@ export function handleBrowserContentRequest(
       if (!outcome.ok) return failure(request, outcome.code, outcome.message);
       return { t: "browser-content.result", operation: "activate-control", result: { identity: request.identity, ...outcome.result } };
     }
+    case "region-fields": {
+      const fields = regionFields(document, request.regionId);
+      if (fields === null) return failure(request, "not-found", "That part of the page is gone; refresh the outline.");
+      return { t: "browser-content.result", operation: "region-fields", result: { identity: request.identity, ...fields } };
+    }
+    case "field-options":
+    case "set-field":
+      return failure(request, "exception", "This operation runs through handleFieldRequest.");
     case "read-content": return readBlock(document, request, frameId);
     case "read-item": return readItem(document, request, frameId);
     case "site-search": return submitVisibleSiteSearch(document, request, frameId);

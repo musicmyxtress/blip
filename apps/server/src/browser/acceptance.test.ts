@@ -172,6 +172,9 @@ function makeBrowserRig(options: {
       case "read-region":
       case "region-controls":
       case "activate-control":
+      case "region-fields":
+      case "field-options":
+      case "set-field":
         return { ok: false, requestId: request.requestId, operation: operation.op, error: { code: "unavailable", message: "Not simulated." } };
       case "capture": {
         if (pendingPageIndex !== null && !options.navigationNeverLoads && capturesUntilArrival-- <= 0) {

@@ -6,6 +6,9 @@ import type {
   BrowserOutlineResult,
   BrowserRegionResult,
   BrowserRegionControlsResult,
+  BrowserFieldsResult,
+  BrowserFieldOptionsResult,
+  BrowserSetFieldResult,
   BrowserPageIdentity,
   BrowserReadItemResult,
   BrowserResultPayload,
@@ -22,6 +25,9 @@ export type BrowserContentRequest =
   | { t: "browser-content"; operation: "read-region"; identity: BrowserPageIdentity; regionId: string }
   | { t: "browser-content"; operation: "region-controls"; identity: BrowserPageIdentity; regionId: string }
   | { t: "browser-content"; operation: "activate-control"; identity: BrowserPageIdentity; controlId: string; confirmed: boolean }
+  | { t: "browser-content"; operation: "region-fields"; identity: BrowserPageIdentity; regionId: string | null }
+  | { t: "browser-content"; operation: "field-options"; identity: BrowserPageIdentity; fieldId: string; filter: string }
+  | { t: "browser-content"; operation: "set-field"; identity: BrowserPageIdentity; fieldId: string; value?: string; checked?: boolean; option?: number }
   | { t: "browser-content"; operation: "read-content"; identity: BrowserPageIdentity; contentId: string; kind: "heading" | "paragraph" }
   | { t: "browser-content"; operation: "read-item"; identity: BrowserPageIdentity; itemId: string }
   | { t: "browser-content"; operation: "site-search"; identity: BrowserPageIdentity; query: string }
@@ -43,6 +49,9 @@ export type BrowserContentResponse =
   | { t: "browser-content.result"; operation: "read-region"; result: BrowserRegionResult }
   | { t: "browser-content.result"; operation: "region-controls"; result: BrowserRegionControlsResult }
   | { t: "browser-content.result"; operation: "activate-control"; result: { identity: BrowserPageIdentity; kind: "link"; href: string; access: "direct" | "confirm" } | { identity: BrowserPageIdentity; kind: "button" } }
+  | { t: "browser-content.result"; operation: "region-fields"; result: BrowserFieldsResult }
+  | { t: "browser-content.result"; operation: "field-options"; result: BrowserFieldOptionsResult }
+  | { t: "browser-content.result"; operation: "set-field"; result: BrowserSetFieldResult }
   | { t: "browser-content.result"; operation: "list-links"; result: BrowserLinkListResult }
   | { t: "browser-content.result"; operation: "read-content"; result: BrowserContentResult }
   | { t: "browser-content.result"; operation: "read-item"; result: BrowserReadItemResult }

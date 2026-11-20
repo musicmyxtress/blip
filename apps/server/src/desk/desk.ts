@@ -6,8 +6,9 @@
 //   and written to a file under the user's profile, which only that Windows user can read.
 // - Any request with an Origin header is refused: browsers always send Origin on cross-origin
 //   requests, so a web page can never drive the desk even if it guessed the port.
-// - Read-only for now: outline and region reads go through the same BrowserExecutor (and the
-//   extension's identity/staleness checks) as every other browser operation.
+// - Every read and action goes through the same BrowserExecutor (and the extension's identity and
+//   staleness checks) as every other browser operation. Field writes never submit, and password or
+//   card fields are refused in the extension, which is the one place that can see them.
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -60,7 +61,10 @@ function tokenMatches(header: string | undefined, token: string): boolean {
 
 const REGION_ID = /^r[0-9]{1,9}(\.[0-9]{1,4})?$/;
 const CONTROL_ID = /^c[0-9]{1,9}$/;
-const MAX_BODY_BYTES = 4096;
+const FIELD_ID = /^f[0-9]{1,9}$/;
+/** Room for a long description typed into one field (10,000 characters, JSON-escaped). */
+const MAX_BODY_BYTES = 64 * 1024;
+const MAX_FIELD_CHARS = 10_000;
 const MAX_ASK_CHARS = 500;
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
@@ -153,6 +157,55 @@ export async function createDeskApi(options: DeskOptions): Promise<DeskApi> {
     send(res, 200, { ok: true, activated: payload.result });
   }
 
+  /** Sends the result of a field operation, mapping extension errors to HTTP statuses. */
+  function sendFieldResult(res: ServerResponse, result: Awaited<ReturnType<BrowserExecutor["execute"]>>, op: string, key: string): void {
+    if (!result.ok) return send(res, 503, { ok: false, error: result.reason });
+    const payload = result.payload;
+    if (!payload.ok) {
+      const status = payload.error.code === "stale-page" || payload.error.code === "stale-capture" ? 409 : payload.error.code === "invalid-target" ? 422 : 502;
+      return send(res, status, { ok: false, error: payload.error.code, message: payload.error.message });
+    }
+    if (payload.operation !== op) return send(res, 502, { ok: false, error: "invalid-result" });
+    send(res, 200, { ok: true, [key]: payload.result });
+  }
+
+  async function fields(res: ServerResponse, id: string | null): Promise<void> {
+    const regionId = id === null || id === "page" ? null : id;
+    if (regionId !== null && !REGION_ID.test(regionId)) return send(res, 400, { ok: false, error: "invalid-region-id" });
+    if (outlineIdentity === null) return send(res, 409, { ok: false, error: "no-outline", message: "Build an outline first." });
+    const result = await options.executor().execute({ op: "region-fields", regionId, identity: outlineIdentity });
+    sendFieldResult(res, result, "region-fields", "fields");
+  }
+
+  async function fieldOptions(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    let body: unknown;
+    try { body = await readJsonBody(req); } catch { return send(res, 400, { ok: false, error: "invalid-body" }); }
+    const record = typeof body === "object" && body !== null ? body as Record<string, unknown> : {};
+    const id = typeof record.id === "string" ? record.id : "";
+    const filter = typeof record.filter === "string" ? record.filter.slice(0, 200) : "";
+    if (!FIELD_ID.test(id)) return send(res, 400, { ok: false, error: "invalid-field-id" });
+    if (outlineIdentity === null) return send(res, 409, { ok: false, error: "no-outline", message: "Build an outline first." });
+    const result = await options.executor().execute({ op: "field-options", fieldId: id, filter, identity: outlineIdentity });
+    sendFieldResult(res, result, "field-options", "options");
+  }
+
+  async function setField(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    let body: unknown;
+    try { body = await readJsonBody(req); } catch { return send(res, 400, { ok: false, error: "invalid-body" }); }
+    const record = typeof body === "object" && body !== null ? body as Record<string, unknown> : {};
+    const id = typeof record.id === "string" ? record.id : "";
+    if (!FIELD_ID.test(id)) return send(res, 400, { ok: false, error: "invalid-field-id" });
+    const change =
+      typeof record.value === "string" ? { value: record.value.slice(0, MAX_FIELD_CHARS) }
+      : typeof record.checked === "boolean" ? { checked: record.checked }
+      : typeof record.option === "number" && Number.isInteger(record.option) && record.option >= 0 && record.option <= 999 ? { option: record.option }
+      : null;
+    if (change === null) return send(res, 400, { ok: false, error: "invalid-change", message: "Send a value, checked, or option." });
+    if (outlineIdentity === null) return send(res, 409, { ok: false, error: "no-outline", message: "Build an outline first." });
+    const result = await options.executor().execute({ op: "set-field", fieldId: id, identity: outlineIdentity, ...change });
+    sendFieldResult(res, result, "set-field", "set");
+  }
+
   function model(): Promise<AskModel> {
     if (askModel === null) {
       askModel = startClaudeJsonSession({ name: "blip-desk-ask", instructions: ASK_INSTRUCTIONS, model: "sonnet" });
@@ -224,6 +277,9 @@ export async function createDeskApi(options: DeskOptions): Promise<DeskApi> {
         else if (req.method === "GET" && pathname === "/desk/region") await region(res, search.get("id"));
         else if (req.method === "GET" && pathname === "/desk/controls") await controls(res, search.get("id"));
         else if (req.method === "POST" && pathname === "/desk/activate") await activate(req, res);
+        else if (req.method === "GET" && pathname === "/desk/fields") await fields(res, search.get("id"));
+        else if (req.method === "POST" && pathname === "/desk/field-options") await fieldOptions(req, res);
+        else if (req.method === "POST" && pathname === "/desk/set-field") await setField(req, res);
         else if (req.method === "POST" && pathname === "/desk/back") await back(res);
         else if (req.method === "POST" && pathname === "/desk/ask") await ask(req, res);
         else send(res, 404, { ok: false, error: "not-found" });
