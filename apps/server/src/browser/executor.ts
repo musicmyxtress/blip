@@ -144,7 +144,7 @@ export function createBrowserExecutor(options: { hub: Hub; session: Session }): 
       }
 
       const changesPage = operation.op === "navigate" || operation.op === "history" || operation.op === "reload" ||
-        operation.op === "search" || operation.op === "site-search" || operation.op === "open-link" || createsOrSelectsTab;
+        operation.op === "search" || operation.op === "site-search" || operation.op === "open-link" || operation.op === "activate-control" || createsOrSelectsTab;
       if (changesPage) {
         session.clearBrowserAuthorization();
         session.browserCapture = null;

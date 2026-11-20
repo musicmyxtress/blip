@@ -5,6 +5,7 @@
 // (ad frames, sponsored labels, cookie banners, link farms) so the server and model can decide
 // what matters for the user's goal, then read only those regions in full with readRegion().
 // Read-only: nothing here changes the page.
+import { classifyAction, classifyBrowserLink } from "@blip/policy/classify";
 import { isVisible } from "./visibility.js";
 
 export type OutlineRegionKind =
@@ -192,7 +193,10 @@ function listLabel(container: Element, document: Document): string {
       if (!heading.contains(container) && isVisible(heading)) before = heading;
     } else break;
   }
-  return before ? textOf(before, 120) : "";
+  if (before === null) return "";
+  // Only when the list lives inside the heading's own section (not a footer far below it).
+  const root = before.closest("main,[role=main]") ?? document.body ?? before;
+  return sectionContainer(before, root).contains(container) ? textOf(before, 120) : "";
 }
 
 function itemLabel(card: Element): string {
@@ -353,6 +357,7 @@ export function buildOutline(document: Document): PageOutline {
       return { id: itemId, label: itemLabel(card), preview: textOf(card, PREVIEW_CHARS) };
     });
     if (visibleCards.length > MAX_LIST_ITEMS) truncated = true;
+    region.noise = region.noise.filter((signal) => signal !== "link-farm");
     const items = region.items;
     const pageLike = items.filter((item) => PAGE_LINK.test(item.label)).length;
     if (pageLike / items.length >= 0.7) {
@@ -362,7 +367,12 @@ export function buildOutline(document: Document): PageOutline {
       // Every item is just a short link with nothing else: a menu, footer, or tag row.
       region.noise.push("link-row");
     }
-    if (region.label === "") region.label = `${visibleCards.length} items`;
+    if (region.label === "") {
+      const pageHeight = document.documentElement.scrollHeight || 1;
+      region.label = region.noise.includes("link-row")
+        ? (region.rect.y > pageHeight * 0.8 ? "Footer links" : "Links")
+        : "List";
+    }
   }
 
   return {
@@ -386,6 +396,40 @@ function clampRect(rect: DOMRect, view: Window): DOMRect {
   return new DOMRect(left, rect.top, Math.max(0, right - left), rect.height);
 }
 
+/**
+ * Text of a live DOM range: elements wholly inside the range contribute their layout-aware innerText
+ * (which keeps block breaks and skips hidden text); partly covered elements are walked into.
+ */
+function liveRangeText(range: Range): string {
+  const parts: string[] = [];
+  const document = range.startContainer.ownerDocument ?? (range.startContainer as Document);
+  const probe = document.createRange();
+  const walk = (node: Node): void => {
+    if (parts.length > 5000 || !range.intersectsNode(node)) return;
+    if (node.nodeType === 3) {
+      let value = node.nodeValue ?? "";
+      if (node === range.endContainer) value = value.slice(0, range.endOffset);
+      if (node === range.startContainer) value = value.slice(range.startOffset);
+      if (value.trim()) parts.push(value);
+      return;
+    }
+    if (node.nodeType !== 1) return;
+    const element = node as Element;
+    if (element.localName === "script" || element.localName === "style" || element.localName === "noscript") return;
+    probe.selectNode(element);
+    const contained = range.compareBoundaryPoints(Range.START_TO_START, probe) <= 0 &&
+      range.compareBoundaryPoints(Range.END_TO_END, probe) >= 0;
+    if (contained) {
+      const inner = (element as HTMLElement).innerText ?? element.textContent ?? "";
+      if (inner.trim()) parts.push(inner);
+      return;
+    }
+    for (const child of element.childNodes) walk(child);
+  };
+  walk(range.commonAncestorContainer);
+  return parts.join("\n");
+}
+
 export type RegionReadResult = { id: string; label: string; text: string; truncated: boolean } | null;
 
 /** Read the full visible text of one region from the latest outline of this document. */
@@ -399,14 +443,168 @@ export function readRegion(document: Document, regionId: string): RegionReadResu
     const end = sectionEnds.get(regionId);
     const column = sectionColumns.get(regionId) ?? element.closest("main,[role=main]") ?? document.body;
     if (end && end.isConnected) range.setEndBefore(end); else range.setEndAfter(column.lastChild ?? element);
-    const holder = document.createElement("div");
-    holder.appendChild(range.cloneContents());
-    // innerText needs layout; cloned nodes have none, so join block-level text with line breaks.
-    holder.querySelectorAll("p,li,h1,h2,h3,h4,h5,h6,tr,dt,dd,div,br").forEach((node) => node.append("\n"));
-    text = (holder.textContent ?? "").replace(/[ \t]+/g, " ").replace(/\n\s*\n+/g, "\n").trim();
+    text = liveRangeText(range).replace(/[ \t]+/g, " ").replace(/\n\s*\n+/g, "\n").trim();
   } else {
     text = ((element as HTMLElement).innerText ?? element.textContent ?? "").replace(/[ \t]+/g, " ").replace(/\n\s*\n+/g, "\n").trim();
   }
   const truncated = text.length > MAX_READ_CHARS;
   return { id: regionId, label: labelOf(element, document) || textOf(element, 120), text: text.slice(0, MAX_READ_CHARS), truncated };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Controls: the links and buttons inside one region, and acting on the user's choice.
+//
+// Links are never clicked. Activation re-validates the live anchor and returns its address; the
+// extension background then navigates the tab there, so no page script runs. target=_blank is
+// ignored on purpose (the desk always opens in the same tab). Downloads are refused.
+// Buttons are classified with Blip's own policy: click-safe runs directly, pay/delete/send are
+// refused, anything else needs the user's explicit yes. Blip's submit guard still blocks a form
+// submission that a button click would trigger.
+
+type ControlAccess = "direct" | "confirm" | "blocked";
+type ControlEntry = { element: Element; kind: "link" | "button"; label: string; href: string | null };
+
+const CONTROL_SELECTOR = "a[href],button,[role=button],[role=link],input[type=submit],input[type=button],input[type=reset],input[type=image],summary";
+const MAX_CONTROLS = 200;
+let nextControlNumber = 0;
+const controlsByDocument = new WeakMap<Document, Map<string, ControlEntry>>();
+
+function controlLabel(element: Element): string {
+  const aria = element.getAttribute("aria-label")?.trim();
+  if (aria) return aria.slice(0, 120);
+  const text = textOf(element, 120);
+  if (text) return text;
+  const title = element.getAttribute("title")?.trim();
+  if (title) return title.slice(0, 120);
+  if (element.localName === "input") {
+    const value = (element as HTMLInputElement).value?.trim() || element.getAttribute("alt")?.trim();
+    if (value) return value.slice(0, 120);
+  }
+  const alt = element.querySelector("img[alt]")?.getAttribute("alt")?.trim();
+  return alt ? alt.slice(0, 120) : "";
+}
+
+/** Links with a real web address are links; "#" and javascript: anchors behave like buttons. */
+function controlKind(element: Element): { kind: "link" | "button"; href: string | null } {
+  if (element.localName === "a" && element.hasAttribute("href")) {
+    const raw = (element.getAttribute("href") ?? "").trim();
+    const href = (element as HTMLAnchorElement).href;
+    if (raw !== "" && !raw.startsWith("#") && /^https?:/i.test(href)) return { kind: "link", href };
+  }
+  return { kind: "button", href: null };
+}
+
+function hostOf(href: string | null): string | null {
+  if (href === null) return null;
+  try { return new URL(href).host.toLowerCase() || null; } catch { return null; }
+}
+
+function rateControl(element: Element, entry: { kind: "link" | "button"; label: string; href: string | null }, pageUrl: string): { access: ControlAccess; note: string } {
+  if (entry.kind === "link") {
+    if (element.hasAttribute("download")) return { access: "blocked", note: "download link" };
+    const safety = classifyBrowserLink({ tag: "a", href: entry.href ?? "", target: "", origin: pageUrl, text: entry.label });
+    if (safety === "same-origin-safe-get") return { access: "direct", note: "" };
+    if (safety === "unsupported") return { access: "blocked", note: "this link can't be checked safely" };
+    let pageHost = "";
+    try { pageHost = new URL(pageUrl).host; } catch { /* keep empty */ }
+    const host = hostOf(entry.href);
+    return { access: "confirm", note: host && host !== pageHost ? `goes to ${host}` : "may change something" };
+  }
+  const tag = element.localName;
+  const inForm = element.closest("form") !== null;
+  const typeAttribute = element.getAttribute("type");
+  // A <button> with no type only submits inside a form; elsewhere it is an ordinary button.
+  const buttonType = tag === "button" ? (typeAttribute ?? (inForm ? "submit" : "button")) : undefined;
+  const classified = classifyAction({
+    tag: tag === "a" || tag === "summary" ? "button" : tag,
+    role: element.getAttribute("role") ?? undefined,
+    text: entry.label,
+    buttonType: tag === "button" ? buttonType : tag === "a" || tag === "summary" || element.getAttribute("role") === "button" ? "button" : undefined,
+    inputType: tag === "input" ? (element as HTMLInputElement).type : undefined,
+    inForm,
+  });
+  if (classified.kind === "click-safe") return { access: "direct", note: "" };
+  if (classified.kind === "pay") return { access: "blocked", note: "pays money; do this on the page for now" };
+  if (classified.kind === "delete") return { access: "blocked", note: "deletes something; do this on the page for now" };
+  if (classified.kind === "send") return { access: "blocked", note: "sends something; do this on the page for now" };
+  return { access: "confirm", note: inForm ? "may submit a form" : "may change something" };
+}
+
+/** Elements belonging to a region: its element subtree, or for heading sections the heading's range. */
+function regionScopeControls(document: Document, regionId: string): Element[] | null {
+  const element = regionsByDocument.get(document)?.get(regionId);
+  if (!element || !element.isConnected) return null;
+  if (sectionEnds.has(regionId)) {
+    const column = sectionColumns.get(regionId) ?? element.closest("main,[role=main]") ?? document.body;
+    const range = document.createRange();
+    range.setStartBefore(element);
+    const end = sectionEnds.get(regionId);
+    if (end && end.isConnected) range.setEndBefore(end); else range.setEndAfter(column.lastChild ?? element);
+    return [...column.querySelectorAll(CONTROL_SELECTOR)].filter((candidate) => range.intersectsNode(candidate));
+  }
+  const inside = [...element.querySelectorAll(CONTROL_SELECTOR)];
+  return element.matches(CONTROL_SELECTOR) ? [element, ...inside] : inside;
+}
+
+export type RegionControlsResult = {
+  id: string;
+  controls: Array<{ id: string; kind: "link" | "button"; label: string; host: string | null; access: ControlAccess; note: string }>;
+  truncated: boolean;
+};
+
+export function regionControls(document: Document, regionId: string): RegionControlsResult | null {
+  const elements = regionScopeControls(document, regionId);
+  if (elements === null) return null;
+  const pageUrl = document.location?.href ?? "";
+  const map = new Map<string, ControlEntry>();
+  controlsByDocument.set(document, map);
+  const controls: RegionControlsResult["controls"] = [];
+  const seenLinks = new Map<string, number>();
+  let truncated = false;
+  for (const element of elements) {
+    if (!isVisible(element) || element.closest("[aria-hidden=true],[hidden],[inert]")) continue;
+    // Skip a control nested inside another control already listed (a button inside a link card).
+    if (element.parentElement?.closest(CONTROL_SELECTOR) && elements.includes(element.parentElement.closest(CONTROL_SELECTOR)!)) continue;
+    const { kind, href } = controlKind(element);
+    const label = controlLabel(element);
+    if (kind === "link" && href !== null) {
+      // Cards often link the image and the title to the same place: keep one, preferring a label.
+      const existing = seenLinks.get(href);
+      if (existing !== undefined) {
+        if (controls[existing]!.label === "" && label !== "") controls[existing]!.label = label;
+        continue;
+      }
+    }
+    if (label === "" && kind === "button") continue;
+    if (controls.length >= MAX_CONTROLS) { truncated = true; break; }
+    nextControlNumber += 1;
+    const id = `c${nextControlNumber}`;
+    const rating = rateControl(element, { kind, label, href }, pageUrl);
+    map.set(id, { element, kind, label, href });
+    if (kind === "link" && href !== null) seenLinks.set(href, controls.length);
+    controls.push({ id, kind, label: label || (hostOf(href) ?? "Unlabelled link"), host: kind === "link" ? hostOf(href) : null, ...rating });
+  }
+  return { id: regionId, controls, truncated };
+}
+
+export type ActivateOutcome =
+  | { ok: true; result: { kind: "link"; href: string; access: "direct" | "confirm" } | { kind: "button" } }
+  | { ok: false; code: "not-found" | "stale-capture" | "unauthorized" | "invalid-target"; message: string };
+
+export function activateControl(document: Document, controlId: string, confirmed: boolean): ActivateOutcome {
+  const entry = controlsByDocument.get(document)?.get(controlId);
+  if (!entry) return { ok: false, code: "not-found", message: "That link or button is no longer listed; open the part again." };
+  const element = entry.element;
+  if (!element.isConnected || !isVisible(element)) return { ok: false, code: "stale-capture", message: "That link or button is no longer on the page." };
+  // Re-check live: the label and address must still be what the user chose.
+  const live = controlKind(element);
+  if (live.kind !== entry.kind || live.href !== entry.href || controlLabel(element) !== entry.label) {
+    return { ok: false, code: "stale-capture", message: "That link or button changed after it was listed." };
+  }
+  const rating = rateControl(element, entry, document.location?.href ?? "");
+  if (rating.access === "blocked") return { ok: false, code: "invalid-target", message: `Not allowed: ${rating.note}.` };
+  if (rating.access === "confirm" && !confirmed) return { ok: false, code: "unauthorized", message: `This needs your yes first: ${rating.note}.` };
+  if (entry.kind === "link") return { ok: true, result: { kind: "link", href: entry.href!, access: rating.access } };
+  (element as HTMLElement).click();
+  return { ok: true, result: { kind: "button" } };
 }

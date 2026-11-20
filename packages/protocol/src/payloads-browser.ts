@@ -72,6 +72,8 @@ const NonEmptyQuery = boundedText(500).refine((value) => value.trim().length > 0
 
 /** Outline region and list-item ids issued by the extension: r12 for a region, r12.3 for an item in a list. */
 const RegionId = z.string().min(2).max(32).regex(/^r[0-9]{1,9}(\.[0-9]{1,4})?$/);
+/** Link/button ids issued by a region-controls read. */
+const ControlId = z.string().min(2).max(16).regex(/^c[0-9]{1,9}$/);
 
 export const BrowserPageIdentity = z.object({
   captureId: BrowserId,
@@ -241,6 +243,13 @@ export const BrowserOperation = z.discriminatedUnion("op", [
   z.object({ op: z.literal("outline") }),
   /** Full text of one outline region or list item, bound to the outline that issued its id. */
   z.object({ op: z.literal("read-region"), regionId: RegionId, identity: BrowserPageIdentity }),
+  /** The links and buttons inside one outline region or list item, each with a safety rating. */
+  z.object({ op: z.literal("region-controls"), regionId: RegionId, identity: BrowserPageIdentity }),
+  /**
+   * Follow a link (by navigating the tab to its re-validated address, never by clicking) or press a
+   * button. `confirmed` is the user's explicit yes for controls rated "confirm"; "blocked" never runs.
+   */
+  z.object({ op: z.literal("activate-control"), controlId: ControlId, identity: BrowserPageIdentity, confirmed: z.boolean() }),
 ]);
 export type BrowserOperation = z.infer<typeof BrowserOperation>;
 
@@ -298,6 +307,34 @@ export const BrowserRegionResult = z.object({
 });
 export type BrowserRegionResult = z.infer<typeof BrowserRegionResult>;
 
+export const BrowserControl = z.object({
+  id: ControlId,
+  kind: z.enum(["link", "button"]),
+  label: boundedText(120),
+  /** Destination host for links; null for buttons. */
+  host: HostHint.nullable(),
+  /** direct: runs on the user's choice; confirm: needs an explicit yes; blocked: refused. */
+  access: z.enum(["direct", "confirm", "blocked"]),
+  /** Short reason for confirm/blocked, for speech. */
+  note: boundedText(120),
+}).strict();
+export type BrowserControl = z.infer<typeof BrowserControl>;
+
+export const BrowserRegionControlsResult = z.object({
+  identity: BrowserPageIdentity,
+  id: RegionId,
+  controls: z.array(BrowserControl).max(200),
+  truncated: z.boolean(),
+});
+export type BrowserRegionControlsResult = z.infer<typeof BrowserRegionControlsResult>;
+
+export const BrowserActivateResult = z.object({
+  tabId: TabId,
+  kind: z.enum(["link", "button"]),
+  status: z.enum(["dispatched", "clicked"]),
+});
+export type BrowserActivateResult = z.infer<typeof BrowserActivateResult>;
+
 /** Live read result for one item, still bound to the exact capture that supplied its ID. */
 export const BrowserReadItemResult = BrowserContentItem;
 export type BrowserReadItemResult = z.infer<typeof BrowserReadItemResult>;
@@ -318,7 +355,7 @@ export type BrowserRequestPayload = z.infer<typeof BrowserRequestPayload>;
 
 export const BrowserOperationName = z.enum([
   "location", "capture", "navigate", "history", "reload", "search", "site-search", "tabs",
-  "list-links", "read-content", "read-item", "open-link", "scroll", "find", "outline", "read-region", "unknown",
+  "list-links", "read-content", "read-item", "open-link", "scroll", "find", "outline", "read-region", "region-controls", "activate-control", "unknown",
 ]);
 
 const BrowserCommandResult = z.object({
@@ -385,6 +422,8 @@ const BrowserSuccess = z.discriminatedUnion("operation", [
   z.object({ ok: z.literal(true), requestId: BrowserId, operation: z.literal("find"), result: BrowserFindResult }),
   z.object({ ok: z.literal(true), requestId: BrowserId, operation: z.literal("outline"), result: BrowserOutlineResult }),
   z.object({ ok: z.literal(true), requestId: BrowserId, operation: z.literal("read-region"), result: BrowserRegionResult }),
+  z.object({ ok: z.literal(true), requestId: BrowserId, operation: z.literal("region-controls"), result: BrowserRegionControlsResult }),
+  z.object({ ok: z.literal(true), requestId: BrowserId, operation: z.literal("activate-control"), result: BrowserActivateResult }),
 ]);
 
 const BrowserFailure = z.object({

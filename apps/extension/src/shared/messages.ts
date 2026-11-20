@@ -5,6 +5,7 @@ import type {
   BrowserLinkListResult,
   BrowserOutlineResult,
   BrowserRegionResult,
+  BrowserRegionControlsResult,
   BrowserPageIdentity,
   BrowserReadItemResult,
   BrowserResultPayload,
@@ -19,6 +20,8 @@ export type BrowserContentRequest =
   | { t: "browser-content"; operation: "capture" | "list-links"; identity: BrowserPageIdentity }
   | { t: "browser-content"; operation: "outline"; identity: BrowserPageIdentity }
   | { t: "browser-content"; operation: "read-region"; identity: BrowserPageIdentity; regionId: string }
+  | { t: "browser-content"; operation: "region-controls"; identity: BrowserPageIdentity; regionId: string }
+  | { t: "browser-content"; operation: "activate-control"; identity: BrowserPageIdentity; controlId: string; confirmed: boolean }
   | { t: "browser-content"; operation: "read-content"; identity: BrowserPageIdentity; contentId: string; kind: "heading" | "paragraph" }
   | { t: "browser-content"; operation: "read-item"; identity: BrowserPageIdentity; itemId: string }
   | { t: "browser-content"; operation: "site-search"; identity: BrowserPageIdentity; query: string }
@@ -38,6 +41,8 @@ export type BrowserContentResponse =
   | { t: "browser-content.result"; operation: "capture"; result: BrowserContentResult }
   | { t: "browser-content.result"; operation: "outline"; result: BrowserOutlineResult }
   | { t: "browser-content.result"; operation: "read-region"; result: BrowserRegionResult }
+  | { t: "browser-content.result"; operation: "region-controls"; result: BrowserRegionControlsResult }
+  | { t: "browser-content.result"; operation: "activate-control"; result: { identity: BrowserPageIdentity; kind: "link"; href: string; access: "direct" | "confirm" } | { identity: BrowserPageIdentity; kind: "button" } }
   | { t: "browser-content.result"; operation: "list-links"; result: BrowserLinkListResult }
   | { t: "browser-content.result"; operation: "read-content"; result: BrowserContentResult }
   | { t: "browser-content.result"; operation: "read-item"; result: BrowserReadItemResult }

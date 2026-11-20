@@ -13,7 +13,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import type { BrowserOutlineResult, BrowserPageIdentity } from "@blip/protocol";
+import { newId, type BrowserOutlineResult, type BrowserPageIdentity } from "@blip/protocol";
 import type { BrowserExecutor } from "../browser/executor";
 import { log } from "../log";
 
@@ -53,6 +53,19 @@ function tokenMatches(header: string | undefined, token: string): boolean {
 }
 
 const REGION_ID = /^r[0-9]{1,9}(\.[0-9]{1,4})?$/;
+const CONTROL_ID = /^c[0-9]{1,9}$/;
+const MAX_BODY_BYTES = 1024;
+
+async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length;
+    if (size > MAX_BODY_BYTES) throw new Error("body-too-large");
+    chunks.push(chunk as Buffer);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
 
 export async function createDeskApi(options: DeskOptions): Promise<DeskApi> {
   const token = randomBytes(32).toString("base64url");
@@ -63,6 +76,13 @@ export async function createDeskApi(options: DeskOptions): Promise<DeskApi> {
 
   /** Identity of the latest outline: region ids are only valid against the outline that issued them. */
   let outlineIdentity: BrowserPageIdentity | null = null;
+  let outlineTitle = "";
+  /**
+   * Pages the user left by following a link from the desk, newest last. Back only ever navigates to
+   * an address recorded here (where the user actually was), never to one taken from a page or model.
+   */
+  const history: Array<{ tabId: number; url: string; title: string }> = [];
+  const MAX_HISTORY = 50;
 
   async function outline(res: ServerResponse): Promise<void> {
     const result = await options.executor().execute({ op: "outline" });
@@ -73,6 +93,7 @@ export async function createDeskApi(options: DeskOptions): Promise<DeskApi> {
     const outlineResult: BrowserOutlineResult = payload.result;
     const { captureId, captureRevision, tabId, pageUrl } = outlineResult;
     outlineIdentity = { captureId, captureRevision, tabId, pageUrl };
+    outlineTitle = outlineResult.title;
     send(res, 200, { ok: true, outline: outlineResult });
   }
 
@@ -85,6 +106,52 @@ export async function createDeskApi(options: DeskOptions): Promise<DeskApi> {
     if (!payload.ok) return send(res, payload.error.code === "stale-page" ? 409 : 502, { ok: false, error: payload.error.code, message: payload.error.message });
     if (payload.operation !== "read-region") return send(res, 502, { ok: false, error: "invalid-result" });
     send(res, 200, { ok: true, region: payload.result });
+  }
+
+  async function controls(res: ServerResponse, id: string | null): Promise<void> {
+    if (id === null || !REGION_ID.test(id)) return send(res, 400, { ok: false, error: "invalid-region-id" });
+    if (outlineIdentity === null) return send(res, 409, { ok: false, error: "no-outline", message: "Build an outline first." });
+    const result = await options.executor().execute({ op: "region-controls", regionId: id, identity: outlineIdentity });
+    if (!result.ok) return send(res, 503, { ok: false, error: result.reason });
+    const payload = result.payload;
+    if (!payload.ok) return send(res, payload.error.code === "stale-page" ? 409 : 502, { ok: false, error: payload.error.code, message: payload.error.message });
+    if (payload.operation !== "region-controls") return send(res, 502, { ok: false, error: "invalid-result" });
+    send(res, 200, { ok: true, controls: payload.result });
+  }
+
+  async function activate(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    let body: unknown;
+    try { body = await readJsonBody(req); } catch { return send(res, 400, { ok: false, error: "invalid-body" }); }
+    const record = typeof body === "object" && body !== null ? body as Record<string, unknown> : {};
+    const id = typeof record.id === "string" ? record.id : "";
+    const confirmed = record.confirm === true;
+    if (!CONTROL_ID.test(id)) return send(res, 400, { ok: false, error: "invalid-control-id" });
+    if (outlineIdentity === null) return send(res, 409, { ok: false, error: "no-outline", message: "Build an outline first." });
+    const leaving = { tabId: outlineIdentity.tabId, url: outlineIdentity.pageUrl, title: outlineTitle };
+    const result = await options.executor().execute({ op: "activate-control", controlId: id, identity: outlineIdentity, confirmed });
+    if (!result.ok) return send(res, 503, { ok: false, error: result.reason });
+    const payload = result.payload;
+    if (!payload.ok) return send(res, payload.error.code === "unauthorized" ? 403 : payload.error.code === "stale-page" ? 409 : 502, { ok: false, error: payload.error.code, message: payload.error.message });
+    if (payload.operation !== "activate-control") return send(res, 502, { ok: false, error: "invalid-result" });
+    // The page may now be different: region and control ids from the old outline are void.
+    if (payload.result.kind === "link") {
+      outlineIdentity = null;
+      history.push(leaving);
+      if (history.length > MAX_HISTORY) history.shift();
+    }
+    send(res, 200, { ok: true, activated: payload.result });
+  }
+
+  async function back(res: ServerResponse): Promise<void> {
+    const previous = history.at(-1);
+    if (previous === undefined) return send(res, 409, { ok: false, error: "no-history", message: "There's no earlier page to go back to." });
+    const result = await options.executor().execute({ op: "navigate", url: previous.url, authorizationId: newId() });
+    if (!result.ok) return send(res, 503, { ok: false, error: result.reason });
+    const payload = result.payload;
+    if (!payload.ok) return send(res, 502, { ok: false, error: payload.error.code, message: payload.error.message });
+    history.pop();
+    outlineIdentity = null;
+    send(res, 200, { ok: true, back: { url: previous.url, title: previous.title } });
   }
 
   return {
@@ -104,6 +171,9 @@ export async function createDeskApi(options: DeskOptions): Promise<DeskApi> {
       try {
         if (req.method === "GET" && pathname === "/desk/outline") await outline(res);
         else if (req.method === "GET" && pathname === "/desk/region") await region(res, search.get("id"));
+        else if (req.method === "GET" && pathname === "/desk/controls") await controls(res, search.get("id"));
+        else if (req.method === "POST" && pathname === "/desk/activate") await activate(req, res);
+        else if (req.method === "POST" && pathname === "/desk/back") await back(res);
         else send(res, 404, { ok: false, error: "not-found" });
       } catch (error) {
         log("warn", { msg: "desk request failed", code: error instanceof Error ? error.name : "unknown" });

@@ -369,6 +369,63 @@ export function createBrowserRequestDispatcher(dependencies: BrowserRequestDepen
       return success(requestId, "read-region", typed.result);
     }
 
+    if (operation.op === "region-controls") {
+      const identity = operation.identity;
+      const current = await liveCurrentTab(api, dependencies, identity.tabId, identity.pageUrl);
+      if (!current) return failure(requestId, "region-controls", "stale-page", "The current browser page no longer matches this outline.");
+      const sent = await sendContent(dependencies, current.id, { t: "browser-content", operation: "region-controls", identity, regionId: operation.regionId });
+      if (!sent.ok) return failure(requestId, "region-controls", sent.code, sent.code === "timeout"
+        ? "Listing links and buttons did not finish before its time limit."
+        : "The top-level content frame is unavailable.");
+      const typed = sent.response as BrowserContentResponse;
+      const failed = contentFailure(requestId, "region-controls", typed);
+      if (failed) return failed;
+      if (typed.t !== "browser-content.result" || typed.operation !== "region-controls" ||
+          !sameIdentity(identity, typed.result.identity) || typed.result.id !== operation.regionId) {
+        return failure(requestId, "region-controls", "stale-capture", "That part of the page no longer matches the outline.");
+      }
+      return success(requestId, "region-controls", typed.result);
+    }
+
+    if (operation.op === "activate-control") {
+      const identity = operation.identity;
+      const current = await liveCurrentTab(api, dependencies, identity.tabId, identity.pageUrl);
+      if (!current) return failure(requestId, "activate-control", "stale-page", "The page changed; refresh the outline.");
+      const sent = await sendContent(dependencies, current.id, {
+        t: "browser-content", operation: "activate-control", identity, controlId: operation.controlId, confirmed: operation.confirmed,
+      });
+      if (!sent.ok) return failure(requestId, "activate-control", sent.code, sent.code === "timeout"
+        ? "The page did not answer in time."
+        : "The top-level content frame is unavailable.");
+      const typed = sent.response as BrowserContentResponse;
+      const failed = contentFailure(requestId, "activate-control", typed);
+      if (failed) return failed;
+      if (typed.t !== "browser-content.result" || typed.operation !== "activate-control" || !sameIdentity(identity, typed.result.identity)) {
+        return failure(requestId, "activate-control", "stale-capture", "The page changed before that could run.");
+      }
+      const outcome = typed.result;
+      if (outcome.kind === "button") return success(requestId, "activate-control", { tabId: current.id, kind: "button", status: "clicked" });
+      // Links: navigate the tab to the re-validated address; never run the page's click handlers.
+      const destination = BrowserDestinationUrl.safeParse(outcome.href);
+      if (!destination.success) return failure(requestId, "activate-control", "unsupported-destination-check", "That link's address is not a safe web address.");
+      const crossOrigin = new URL(destination.data).origin !== new URL(identity.pageUrl).origin;
+      if ((crossOrigin || outcome.access === "confirm") && !operation.confirmed) {
+        return failure(requestId, "activate-control", "unauthorized", "This link needs your yes first.");
+      }
+      if (!api.tabs?.update) return failure(requestId, "activate-control", "unavailable", "Browser link navigation is unavailable.");
+      const rechecked = await liveCurrentTab(api, dependencies, current.id, identity.pageUrl);
+      if (!rechecked) return failure(requestId, "activate-control", "stale-page", "The page changed before the link could open.");
+      try {
+        const updated = await api.tabs.update(current.id, { url: destination.data });
+        if (updated.id !== current.id) return failure(requestId, "activate-control", "stale-page", "The target tab changed during link navigation.");
+        (dependencies.rememberTargetTab ?? rememberTargetTab)({ ...updated, id: current.id, url: destination.data });
+        snapshotVersions.forget(current.id);
+        return success(requestId, "activate-control", { tabId: current.id, kind: "link", status: "dispatched" });
+      } catch {
+        return failure(requestId, "activate-control", "exception", "The browser rejected that link.");
+      }
+    }
+
     if (operation.op === "capture" || operation.op === "list-links") {
       const expectedIdentity = operation.op === "list-links" ? operation.identity : undefined;
       const current = await liveCurrentTab(api, dependencies, expectedIdentity?.tabId ?? tabId, expectedIdentity?.pageUrl);

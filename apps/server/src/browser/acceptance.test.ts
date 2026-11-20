@@ -170,6 +170,8 @@ function makeBrowserRig(options: {
     switch (operation.op) {
       case "outline":
       case "read-region":
+      case "region-controls":
+      case "activate-control":
         return { ok: false, requestId: request.requestId, operation: operation.op, error: { code: "unavailable", message: "Not simulated." } };
       case "capture": {
         if (pendingPageIndex !== null && !options.navigationNeverLoads && capturesUntilArrival-- <= 0) {

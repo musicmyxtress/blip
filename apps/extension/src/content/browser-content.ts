@@ -11,7 +11,7 @@ import {
 import { classifyBrowserLink } from "@blip/policy/classify";
 import { boundedText } from "./text.js";
 import { isVisible } from "./visibility.js";
-import { buildOutline, readRegion } from "./outline.js";
+import { activateControl, buildOutline, readRegion, regionControls } from "./outline.js";
 import { beginOneSubmitAllowance } from "./submit-guard.js";
 import type { BrowserContentRequest, BrowserContentResponse } from "../shared/messages.js";
 
@@ -704,6 +704,16 @@ export function handleBrowserContentRequest(
       const region = readRegion(document, request.regionId);
       if (region === null) return failure(request, "not-found", "That part of the page is gone; refresh the outline.");
       return { t: "browser-content.result", operation: "read-region", result: { identity: request.identity, ...region } };
+    }
+    case "region-controls": {
+      const controls = regionControls(document, request.regionId);
+      if (controls === null) return failure(request, "not-found", "That part of the page is gone; refresh the outline.");
+      return { t: "browser-content.result", operation: "region-controls", result: { identity: request.identity, ...controls } };
+    }
+    case "activate-control": {
+      const outcome = activateControl(document, request.controlId, request.confirmed);
+      if (!outcome.ok) return failure(request, outcome.code, outcome.message);
+      return { t: "browser-content.result", operation: "activate-control", result: { identity: request.identity, ...outcome.result } };
     }
     case "read-content": return readBlock(document, request, frameId);
     case "read-item": return readItem(document, request, frameId);
